@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { setup, status, prepareOpening, routeCreation, setWorkspaceRouting } from "../server/service";
-import { run } from "../server/policy";
+import { setup, status, prepareOpening, routeCreation, setWorkspaceRouting, setDaemonAccess, receiptPath } from "../server/service";
+import { hash, run } from "../server/policy";
 
 // Paseo 0.15.3 recursively merges objects, replacing arrays and scalar values.
 function merge(before: any, patch: any): any {
@@ -57,7 +57,7 @@ await setup({config:{get:async()=>({config:JSON.parse(await fs.readFile(file,'ut
   const saved = JSON.parse(await fs.readFile(path.join(f.root, "installation.json"), "utf8"));
   const current = await f.get();
   assert.deepEqual(current.providers["safehouse-pi"], saved.entries["safehouse-pi"]);
-  assert.equal(current.providers["safehouse-pi"].paseoTools.enabled, false);
+  assert.equal(current.providers["safehouse-pi"].paseoTools.enabled, true);
   assert.equal(current.providers.pi.paseoTools.enabled, true);
   assert.deepEqual(current.providers.pi, f.initial.providers.pi);
   assert.deepEqual(current.providers.peer, f.initial.providers.peer);
@@ -376,4 +376,109 @@ test("draft metadata routes independently without changing workspace defaults or
   await assert.rejects(route({ "paseo-safehouse.launch": false }, "safehouse-pi"));
   await assert.rejects(prepareOpening(opening, f.host));
   assert.equal((await route({ "paseo-safehouse.launch": false })).config.provider, "pi");
+});
+
+test("wrapped Claude, Codex and Pi entries follow the source paseoTools policy", { skip: process.platform !== "darwin" }, async t => {
+  const f = await fixture(t), config = await f.get();
+  for (const host of ["claude", "codex"]) await fs.writeFile(path.join(f.bin, host), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  config.providers.codex = { paseoTools: { disabledTools: ["browser_navigate"] } };
+  await fs.writeFile(f.configFile, JSON.stringify(config));
+  await setup(f.host);
+  // An installation made before this change forced enabled: false on every wrapped entry.
+  const forced = await f.get(), installed = JSON.parse(await fs.readFile(path.join(f.root, "installation.json"), "utf8"));
+  for (const host of ["claude", "codex", "pi"]) {
+    const id = `safehouse-${host}`;
+    forced.providers[id].paseoTools = installed.entries[id].paseoTools = { ...forced.providers[host]?.paseoTools, enabled: false };
+  }
+  await fs.writeFile(f.configFile, JSON.stringify(forced));
+  await fs.writeFile(path.join(f.root, "installation.json"), JSON.stringify(installed));
+  await setup(f.host);
+  const refreshed = await f.get();
+  // Paseo enables tools unless enabled is false, so an absent source policy and enabled: true are equal.
+  assert.deepEqual(refreshed.providers["safehouse-claude"].paseoTools, { enabled: true });
+  assert.deepEqual(refreshed.providers["safehouse-codex"].paseoTools, { disabledTools: ["browser_navigate"], enabled: true });
+  assert.deepEqual(refreshed.providers["safehouse-pi"].paseoTools, { enabled: true });
+  const policies = { claude: { enabled: false, disabledTools: ["list_agents"] }, codex: { enabled: true, disabledTools: ["browser_navigate"] }, pi: { enabled: false } };
+  for (const [host, paseoTools] of Object.entries(policies)) refreshed.providers[host] = { ...refreshed.providers[host], paseoTools };
+  await fs.writeFile(f.configFile, JSON.stringify(refreshed));
+  await setup(f.host);
+  const after = await f.get();
+  for (const [host, paseoTools] of Object.entries(policies)) {
+    assert.deepEqual(after.providers[`safehouse-${host}`].paseoTools, paseoTools, host);
+    assert.deepEqual(after.providers[host].paseoTools, paseoTools, host);
+  }
+});
+
+async function accessFixture(t: any) {
+  const f = await fixture(t), listed: string[] = [];
+  Object.assign(f.host, {
+    workspaces: { ref: () => ({ refresh: async () => ({ workspaceDirectory: f.dir }) }) },
+    agents: { ref: () => ({}), list: async () => ({ entries: listed.map(id => ({ agent: { id, title: id, provider: "safehouse-pi", workspaceId: "workspace" } })) }) },
+  });
+  await setup(f.host);
+  const open = (agentId: string, reason: string, labels: Record<string, string> = {}, metadata?: Record<string, unknown>) =>
+    prepareOpening({ agentId, provider: "safehouse-pi", cwd: f.dir, reason, workspaceId: "workspace", purpose: "interactive",
+      title: null, labels, env: {}, tools: [], mcpServers: {}, ...(metadata ? { metadata } : {}) } as Parameters<typeof prepareOpening>[0], f.host);
+  return { f, listed, open, receipt: async (id: string) => JSON.parse(await fs.readFile(receiptPath(id), "utf8")),
+    record: (id: string) => path.join(f.root, "agents", `${hash(id)}.access.json`),
+    workspaceRecord: path.join(f.root, "workspaces", `${hash(f.dir)}.daemon-access.json`) };
+}
+const accessKey = "paseo-safehouse.paseo-access";
+
+test("per-agent paseo access is read once at creation and recorded", { skip: process.platform !== "darwin" }, async t => {
+  const { open, receipt, record } = await accessFixture(t), key = accessKey;
+  await open("label", "create", { [key]: "daemon" });
+  await open("meta", "create", {}, { [key]: "daemon" });
+  await open("both", "create", { [key]: "daemon" }, { [key]: "daemon" });
+  await open("plain", "create");
+  for (const [id, access] of [["label", "daemon"], ["meta", "daemon"], ["both", "daemon"], ["plain", "workspace"]]) {
+    assert.equal((await receipt(id)).paseoAccess, access, id);
+    assert.equal((await receipt(id)).daemonAccess, access === "daemon", id);
+  }
+  const recorded = await fs.readFile(record("label"), "utf8"), plainRecord = await fs.readFile(record("plain"), "utf8");
+  for (const reason of ["resume", "refresh", "import", "create"]) {
+    await open("label", reason, { [key]: "workspace" }, { [key]: "workspace" }); // no de-escalation
+    assert.equal((await receipt("label")).paseoAccess, "daemon", reason);
+    await open("plain", reason, { [key]: "daemon" }, { [key]: "daemon" }); // no escalation
+    assert.equal((await receipt("plain")).paseoAccess, "workspace", reason);
+    assert.equal((await receipt("plain")).daemonAccess, false, reason);
+  }
+  assert.equal(await fs.readFile(record("label"), "utf8"), recorded);
+  assert.equal(await fs.readFile(record("plain"), "utf8"), plainRecord);
+  for (const reason of ["resume", "refresh", "import"]) { // created before this change, or imported
+    await open("legacy", reason, { [key]: "daemon" }, { [key]: "daemon" });
+    assert.equal((await receipt("legacy")).paseoAccess, "workspace", reason);
+    assert.equal((await receipt("legacy")).daemonAccess, false, reason);
+  }
+  await assert.rejects(fs.access(record("legacy")), { code: "ENOENT" });
+  for (const [labels, metadata] of [[{ [key]: "tools" }], [{ [key]: "Daemon" }], [{}, { [key]: true }], [{ [key]: "daemon" }, { [key]: "workspace" }]] as const) {
+    await assert.rejects(open("bad", "create", labels, metadata), /paseo-safehouse\.paseo-access/);
+    await assert.rejects(fs.access(record("bad")), { code: "ENOENT" });
+    await assert.rejects(fs.access(receiptPath("bad")), { code: "ENOENT" });
+  }
+});
+
+test("per-agent daemon access grants only that agent while the workspace stays Off", { skip: process.platform !== "darwin" }, async t => {
+  const { f, open, workspaceRecord } = await accessFixture(t);
+  const snapshot = async (agentId: string, labels?: Record<string, string>) => {
+    const dir = (await open(agentId, "create", labels)).env.SAFEHOUSE_WORKDIR;
+    return { home: (await fs.readFile(path.join(dir, ".safehouse"), "utf8")).split("\n").includes(`add-dirs=${f.home}`),
+      guard: await fs.access(path.join(dir, "daemon.sb")).then(() => true, () => false) };
+  };
+  assert.deepEqual(await snapshot("daemon", { [accessKey]: "daemon" }), { home: true, guard: false });
+  assert.deepEqual(await snapshot("plain"), { home: false, guard: true });
+  await assert.rejects(fs.access(workspaceRecord), { code: "ENOENT" });
+});
+
+test("status reports each agent's access against that agent's effective digest", { skip: process.platform !== "darwin" }, async t => {
+  const { f, listed, open } = await accessFixture(t);
+  await open("daemon", "create", { [accessKey]: "daemon" });
+  await open("plain", "create");
+  listed.push("daemon", "plain");
+  const rows = async () => (await status(f.host, "workspace")).agents.map(a => [a.id, a.paseoAccess, a.daemonAccess, a.changed]);
+  assert.deepEqual(await rows(), [["daemon", "daemon", true, false], ["plain", "workspace", false, false]]);
+  await setDaemonAccess(f.host, "workspace", true, (await status(f.host, "workspace")).daemonAccessRevision);
+  assert.deepEqual(await rows(), [["daemon", "daemon", true, false], ["plain", "workspace", false, true]]);
+  await open("plain", "resume");
+  assert.deepEqual(await rows(), [["daemon", "daemon", true, false], ["plain", "workspace", true, false]]);
 });

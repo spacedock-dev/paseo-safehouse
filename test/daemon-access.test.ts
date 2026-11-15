@@ -72,6 +72,11 @@ test('workspace daemon choice is atomic, independent and snapshot-bound', { skip
   const probe = `const net=require('node:net');const s=net.connect(${port},'127.0.0.1');s.on('connect',()=>{console.log('allowed');s.destroy()});s.on('error',e=>console.log(e.code));`;
   const execute = async(env:any,script=probe) => (await run(launch[0],[...launch.slice(1),'-e',script],{cwd,env:{...process.env,...env},timeout:45000})).stdout.trim();
   assert.equal(await execute(off.env),'EPERM');
+  // One agent created with daemon access reaches the port while the workspace stays Off.
+  const perAgent = await service.prepareOpening({...opening(),agentId:'per-agent',labels:{'paseo-safehouse.paseo-access':'daemon'}},paseo);
+  assert.equal(await execute(perAgent.env),'allowed');
+  assert.equal(await execute((await service.prepareOpening(opening(),paseo)).env),'EPERM');
+  await assert.rejects(fs.stat(path.join(home,'safehouse','workspaces',`${hash(cwd)}.daemon-access.json`)),{code:'ENOENT'});
   const native = async(script:string, args:string[] = []) => (await run((await findExecutable('safehouse'))!,
     ['--workdir',cwd,...args,'--',process.execPath,'-e',script],{cwd,env:policyEnvironment(process.env,''),timeout:45000})).stdout.trim();
   assert.equal(await native(probe),'allowed'); // No home grant or credentials.
@@ -115,7 +120,7 @@ test('workspace daemon choice is atomic, independent and snapshot-bound', { skip
   assert.equal(on.env.PASEO_HOME,home); assert.equal(on.env.PASEO_TOKEN,'');
   assert.equal(await execute(on.env,'console.log(process.env.PASEO_HOME)'),home);
   assert.equal((await service.status(paseo,cwd)).agents[0].changed,false);
-  assert.equal(config.providers['safehouse-probe'].paseoTools.enabled,false);
+  assert.equal(config.providers['safehouse-probe'].paseoTools.enabled,true);
   assert.equal(config.providers.probe.paseoTools.enabled,true);
   const record = path.join(home,'safehouse','workspaces',`${hash(cwd)}.daemon-access.json`);
   const receiptFile = service.receiptPath('agent');
