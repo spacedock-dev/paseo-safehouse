@@ -263,7 +263,10 @@ The active installation must use loopback TCP. Port restrictions cover IPv4, IPv
 The matcher can also block remote hosts on the same port. Unix sockets beneath the protected homes remain denied with Off.
 Endpoint changes require fresh preparation. This mechanism does not monitor network changes in running processes.
 Remote, proxy, relay, other service routes, and previously delegated work remain outside this direct-process boundary.
-On permits sandbox escape through the daemon. It does not override restrictive user profiles or enable the native Paseo tool bridge.
+On permits sandbox escape through the daemon. It does not override restrictive user profiles. On also allows the native Paseo tools: Paseo injects them when `mcp.injectIntoAgents` is on, and on a daemon without a password the agent MCP endpoint serves the full catalog, browser tools included, without a credential.
+
+One new agent can get daemon access without changing the workspace setting: create it with the label `paseo-safehouse.paseo-access=daemon`, for example `paseo run --label paseo-safehouse.paseo-access=daemon`. The choice is fixed at creation; later label or metadata changes do not change it, and the agent's workers do not inherit it. Daemon access includes the native Paseo tools as described above. `browser_upload` can pass the browser a host file through a workspace symlink.
+Only the opening with reason `create` reads the value, and it writes `safehouse/agents/<agent-id-hash>.access.json` once with an exclusive link. Later openings read only that record; an agent without one uses the workspace setting. An unknown value, or a label and metadata that differ, fails creation. Effective access is the workspace setting OR `daemon`. Receipts and status record `paseoAccess`, and status compares each agent with its own effective digest.
 
 ### Provider discovery
 
@@ -326,7 +329,7 @@ Detached descendants can retain the previous sandbox policy.
 Safehouse restricts the harness process and its children. The Paseo daemon remains outside that sandbox.
 Daemon-side tools, MCP services, and external services have separate authority.
 Explicit creation MCP maps and hook-local MCP maps and tools pass through unchanged.
-Wrapped providers set `paseoTools.enabled: false` to disable the separate agent-side Paseo control bridge.
+Wrapped providers copy the source provider's `paseoTools` policy. When the daemon enables injection, Paseo adds its tool bridge to every Safehouse agent; without daemon access, the port guard blocks the bridge and the agent has no Paseo tools.
 Off snapshots protect daemon homes and captured control ports. On grants direct CLI/API access with whole-daemon authority.
 The daemon and plugin host remain trusted.
 Additional MCP services can provide access outside the process sandbox. Users must consider each service's authority.

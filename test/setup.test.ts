@@ -451,6 +451,11 @@ test("per-agent paseo access is read once at creation and recorded", { skip: pro
     assert.equal((await receipt("legacy")).daemonAccess, false, reason);
   }
   await assert.rejects(fs.access(record("legacy")), { code: "ENOENT" });
+  for (const contents of ["invalid", JSON.stringify({ agentId: "label", access: "tools" }), JSON.stringify({ agentId: "other", access: "daemon" })]) {
+    await fs.writeFile(record("label"), contents);
+    await assert.rejects(open("label", "resume"), /access record is unreadable or invalid/);
+  }
+  await fs.writeFile(record("label"), recorded);
   for (const [labels, metadata] of [[{ [key]: "tools" }], [{ [key]: "Daemon" }], [{}, { [key]: true }], [{ [key]: "daemon" }, { [key]: "workspace" }]] as const) {
     await assert.rejects(open("bad", "create", labels, metadata), /paseo-safehouse\.paseo-access/);
     await assert.rejects(fs.access(record("bad")), { code: "ENOENT" });

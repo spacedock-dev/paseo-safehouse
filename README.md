@@ -95,7 +95,7 @@ The plugin supplies `PASEO_HOME` for the active daemon. The panel shows its path
 On discovers the daemon host’s installed Paseo CLI and grants read access to its containing app bundle.
 This supports renamed apps and user Applications directories.
 This grant is part of the prepared snapshot; `.safehouse` stays unchanged.
-Native Paseo tools stay disabled. On enables direct CLI/API access.
+On lets Safehouse processes reach this daemon through the Paseo CLI/API and the native Paseo tools. Paseo injects the tools when its setting `mcp.injectIntoAgents` is on, including the browser tools when Paseo enables them. On a daemon without a password, the agent tool endpoint needs no credential, so On gives this authority even without injection. All Paseo browser tabs share one logged-in profile. Treat On as authority over the whole daemon and every logged-in session in the Paseo browser.
 Saving leaves the policy editor, `.safehouse`, automatic routing, provider, and conversation unchanged.
 The panel shows each agent's prepared choice. A different saved choice requires reload.
 
@@ -103,6 +103,8 @@ Off blocks direct access to captured local daemon endpoints and daemon homes, ev
 It does not revoke work already delegated to the daemon. Other services and proxy/relay routes can retain authority.
 Running processes and detached descendants keep their prepared access until replaced.
 Custom profiles can still restrict access with On.
+
+One new agent can get daemon access without changing the workspace setting: create it with the label `paseo-safehouse.paseo-access=daemon`, for example `paseo run --label paseo-safehouse.paseo-access=daemon`. The choice is fixed at creation; later label or metadata changes do not change it, and the agent's workers do not inherit it. Daemon access includes the native Paseo tools as described above. `browser_upload` can pass the browser a host file through a workspace symlink.
 
 Composer transport and compatibility are checked on Paseo 0.16.0-beta.2 and 0.15.3.
 Other runtime versions have not been verified.

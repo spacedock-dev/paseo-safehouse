@@ -79,4 +79,7 @@ It is not limited to the current workspace.
 If you intend to grant that authority, select **Allow Paseo daemon access**.
 Then select **Save daemon access**.
 Reload the selected Safehouse agent.
-Native Paseo tools remain disabled. External services and proxy routes retain their separate authority.
+On also gives agents the native Paseo tools, including the browser tools when Paseo enables them. Treat On as authority over the whole daemon and every logged-in session in the Paseo browser, which all workspaces share.
+External services and proxy routes retain their separate authority.
+
+One new agent can get daemon access without changing the workspace setting: create it with the label `paseo-safehouse.paseo-access=daemon`, for example `paseo run --label paseo-safehouse.paseo-access=daemon`. The choice is fixed at creation; later label or metadata changes do not change it, and the agent's workers do not inherit it. Daemon access includes the native Paseo tools as described above. `browser_upload` can pass the browser a host file through a workspace symlink.
