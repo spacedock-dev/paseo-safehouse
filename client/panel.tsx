@@ -247,7 +247,7 @@ export function SafehousePanel({
             <Text style={muted}>Saved: {data.daemonAccess ? "On" : "Off"}. Applies to future Safehouse processes in this workspace; ordinary agents remain ordinary.</Text>
             <Text selectable style={muted}>Local daemon: {data.daemonHome}</Text>
             <Text style={text}>Daemon access is all-or-none. It is not limited to this workspace or one child agent. The daemon can operate other workspaces and agents and execute outside this sandbox. Allow access only when you intend to give the agent that authority.</Text>
-            <Text style={muted}>Off blocks direct access to this local daemon from newly prepared Safehouse processes. Other services, proxy/relay routes and work already delegated to the daemon can retain authority. Native Paseo tools stay disabled; On enables CLI/API access.</Text>
+            <Text style={muted}>Off blocks direct access to this local daemon from newly prepared Safehouse processes. Other services, proxy/relay routes and work already delegated to the daemon can retain authority. On gives CLI/API access and the native Paseo tools, including browser tools when Paseo enables them. Treat On as authority over the whole daemon and the logged-in sessions in the Paseo browser.</Text>
             {accessDirty && accessRevision !== data.daemonAccessRevision ? <Text style={muted}>Saved choice changed in another client. Your draft is retained.</Text> : null}
             {button("Save daemon access", () => void action(async () => {
               try {
@@ -479,6 +479,7 @@ export function SafehousePanel({
                           ? "Policy prepared " + agent.preparedAt
                           : "No policy preparation record"}
                         {` · daemon access ${agent.daemonAccess === null ? "unknown" : agent.daemonAccess ? "On" : "Off"}`}
+                        {agent.paseoAccess === "daemon" ? " · daemon access for this agent" : ""}
                         {!data.policyValid ? " · current policy unavailable" : agent.changed ? " · Changed / Reload required" : ""}
                       </Text>
                       {button(

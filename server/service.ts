@@ -4,6 +4,7 @@ import type {
   PluginSessionOpenRequest,
 } from "@getpaseo/plugin/server";
 import * as fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
@@ -14,6 +15,7 @@ import { finishPending, savePending, serializeSetup, validateInstallation } from
 import { configuredProvider, launchError, type ProviderConfig } from "./providers";
 import {
   atomicJson,
+  atomicWrite,
   capabilities,
   blockedEnvironmentName,
   canonicalDirectory,
@@ -33,7 +35,7 @@ import {
   type ResolvedPolicy,
 } from "./policy";
 
-import { launchChoice, sessionMetadataKey } from "../shared/contracts";
+import { launchChoice, paseoAccessKey, paseoAccessValues, sessionMetadataKey } from "../shared/contracts";
 
 type Paseo = PluginHandlerContext["paseo"];
 export const PLUGIN_ID = "paseo-safehouse";
@@ -69,9 +71,34 @@ type Receipt = {
   preparedAt: string;
   reason: string;
   daemonAccess?: boolean;
+  paseoAccess?: PaseoAccess;
 };
+type PaseoAccess = (typeof paseoAccessValues)[number];
 export const receiptPath = (id: string) =>
   path.join(stateRoot(), "agents", `${hash(id)}.json`);
+
+const agentAccessPath = (id: string) => path.join(stateRoot(), "agents", `${hash(id)}.access.json`);
+async function recordedAccess(agentId: string) {
+  const record = await readJson<{ agentId?: unknown; access?: unknown }>(agentAccessPath(agentId)).catch(() => ({ agentId: null }));
+  if (record && (record.agentId !== agentId || !paseoAccessValues.includes(record.access as PaseoAccess)))
+    throw new Error("Safehouse agent access record is unreadable or invalid. Repair the protected record before launch.");
+  return record ? record.access as PaseoAccess : null;
+}
+// Only the creation open reads the label or metadata. The record is written once and never replaced.
+async function agentAccess(request: PluginSessionOpenRequest & { metadata?: Record<string, unknown> }) {
+  const stored = await recordedAccess(request.agentId);
+  if (stored || request.reason !== "create") return stored ?? "workspace";
+  const label = request.labels?.[paseoAccessKey], metadata = request.metadata?.[paseoAccessKey];
+  if (label !== undefined && metadata !== undefined && label !== metadata)
+    throw new Error(`${paseoAccessKey} differs between the label and the metadata. Give one value and create the agent again.`);
+  const access = label ?? metadata ?? "workspace";
+  if (!paseoAccessValues.includes(access as PaseoAccess))
+    throw new Error(`${paseoAccessKey} must be workspace or daemon. Correct the value and create the agent again.`);
+  const file = agentAccessPath(request.agentId), temp = `${file}.${randomUUID()}.tmp`;
+  await atomicWrite(temp, JSON.stringify({ agentId: request.agentId, access }));
+  try { await fs.link(temp, file); } finally { await fs.rm(temp, { force: true }); }
+  return access as PaseoAccess;
+}
 
 const routingPath = (cwd: string) => path.join(stateRoot(), "workspaces", `${hash(cwd)}.json`);
 async function routingChoice(cwd: string): Promise<boolean | null> {
@@ -319,7 +346,8 @@ async function setupLocked(
     entries[variant(host)] = { ...config, extends: base,
       label: `${host === "pi" ? "Pi" : host[0].toUpperCase() + host.slice(1)} · Safehouse`,
       command: ["/bin/sh", file], env: { ...retainedMasks, ...policyEnvironment(config.env ?? {}, path.join(root, "catalog")) },
-      paseoTools: { ...config.paseoTools, enabled: false } };
+      // Follow the source policy. Paseo treats an absent enabled as true; writing it lets refresh replace a stored false.
+      paseoTools: { ...config.paseoTools, enabled: config.paseoTools?.enabled !== false } };
   }
   for (const id of Object.keys(entries))
     if (!isDeepStrictEqual(current[id] ?? null, old?.entries[id] ?? null))
@@ -465,9 +493,10 @@ export async function prepareOpening(
   if (!(await installation())?.entries[request.provider]) return request;
   const saved = await ready(paseo, request.provider);
   const cwd = await canonicalDirectory(request.cwd);
-  const choice = await daemonChoice(cwd);
-  if (choice.enabled && !saved.catalogGuard) throw new Error("Refresh providers before enabling daemon access for a launch.");
-  const effective = await effectivePolicy(await loadPolicy(cwd, saved.features), choice.enabled, saved);
+  const access = await agentAccess(request);
+  const enabled = (await daemonChoice(cwd)).enabled || access === "daemon";
+  if (enabled && !saved.catalogGuard) throw new Error("Refresh providers before enabling daemon access for a launch.");
+  const effective = await effectivePolicy(await loadPolicy(cwd, saved.features), enabled, saved);
   const policy = effective.policy;
   const snapshot = await prepareSnapshot(stateRoot(), policy, effective.guard);
   await atomicJson(receiptPath(request.agentId), {
@@ -478,7 +507,8 @@ export async function prepareOpening(
     snapshot,
     preparedAt: new Date().toISOString(),
     reason: request.reason,
-    daemonAccess: choice.enabled,
+    daemonAccess: enabled,
+    paseoAccess: access,
   } satisfies Receipt);
   return { ...request, env: policyEnvironment(request.env, snapshot, saved.home) };
 }
@@ -487,7 +517,8 @@ export async function status(paseo: Paseo, workspaceId: string) {
   const saved = await installation();
   let error: string | null = null,
     raw: string | null = null,
-    policy: ResolvedPolicy | null = null;
+    policy: ResolvedPolicy | null = null,
+    daemonPolicy: ResolvedPolicy | null = null;
   let access = { enabled: false, revision: "" };
   try { access = await daemonChoice(cwd); } catch (e) { error = String(e); }
   let policySource: "defaults" | "file" | null = null;
@@ -496,7 +527,11 @@ export async function status(paseo: Paseo, workspaceId: string) {
   try {
     raw = await readSource(cwd);
     policySource = raw === null ? "defaults" : "file";
-    if (saved) policy = (await effectivePolicy(await resolvePolicy(raw ?? "", cwd, saved.features), access.enabled, saved)).policy;
+    if (saved) {
+      const resolved = await resolvePolicy(raw ?? "", cwd, saved.features);
+      policy = (await effectivePolicy(resolved, access.enabled, saved)).policy;
+      daemonPolicy = access.enabled ? policy : (await effectivePolicy(resolved, true, saved)).policy;
+    }
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   }
@@ -547,13 +582,16 @@ export async function status(paseo: Paseo, workspaceId: string) {
           }
         } catch { /* Publication is best-effort; receipts remain authoritative. */ }
         const receipt = await readJson<Receipt>(receiptPath(agent.id));
+        const paseoAccess = await recordedAccess(agent.id).then(stored => stored ?? "workspace", () => null);
+        const enabled = access.enabled || paseoAccess === "daemon", expected = enabled ? daemonPolicy : policy;
         return {
           id: agent.id,
           title: agent.title || agent.id,
           provider: agent.provider,
           digest: receipt?.digest ?? null,
           daemonAccess: receipt?.daemonAccess ?? null,
-          changed: !receipt || (!!policy && (receipt.digest !== policy.digest || receipt.daemonAccess !== access.enabled)),
+          paseoAccess,
+          changed: !receipt || !paseoAccess || (!!expected && (receipt.digest !== expected.digest || receipt.daemonAccess !== enabled)),
           preparedAt: receipt?.preparedAt ?? null,
         };
       }),

@@ -13,6 +13,10 @@ export const availabilityRpc = defineRpc({
     ownedProviderIds: z.array(z.string()),
   }),
 });
+// Only the creation open reads this label or metadata key; a per-agent record decides later opens.
+export const paseoAccessKey = "paseo-safehouse.paseo-access";
+export const paseoAccessValues = ["workspace", "daemon"] as const;
+
 export const installationUrl = "https://github.com/eugene1g/agent-safehouse#install";
 export const statusRpc = defineRpc({
   name: "safehouse.status",
@@ -43,6 +47,7 @@ export const statusRpc = defineRpc({
         digest: z.string().nullable(),
         changed: z.boolean(),
         daemonAccess: z.boolean().nullable(),
+        paseoAccess: z.enum(paseoAccessValues).nullable(),
         preparedAt: z.string().nullable(),
       }),
     ),

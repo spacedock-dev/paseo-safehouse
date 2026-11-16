@@ -120,7 +120,15 @@ Use a disposable plugin copy and workspace when those paths otherwise overlap.
 8. Keep another workspace Off throughout the exercise.
 
 The direct-address case must fail at the network boundary, not merely during credential discovery.
-Neither state exposes built-in Paseo tools. Existing third-party tools retain their separate authority.
+Existing third-party tools retain their separate authority.
+
+Per-agent access and the native Paseo tools use one clean isolated daemon with `mcp.injectIntoAgents` and browser tools on, and one workspace with daemon access Off. For Claude, Codex and Pi:
+
+1. An agent created with `paseo run --label paseo-safehouse.paseo-access=daemon` reaches the daemon, lists the Paseo tools and calls `list_agents`.
+2. An agent created without the value is blocked, has no Paseo tools and completes a normal turn.
+3. Label and metadata changes followed by reload change no access record. A user MCP server stays available.
+4. With the workspace On, an agent without the value gets the tools. An agent created before **Refresh providers** keeps `workspace`.
+
 Subprocess checks do not establish the rendered panel or conversation experience.
 
 ## Installation guidance acceptance
