@@ -335,3 +335,82 @@ const s=net.connect(${port},'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{
   for (const key of ["policy", "snapshot", "state", "plugin", "endpoint"]) assert.equal(direct[key], "allowed");
   t.diagnostic(`Defaults: ${JSON.stringify(result)}; guard removal allowed policy creation; direct control violated fixed denials.`);
 });
+
+test("a launch grants only the selected account home below an Off daemon home", { skip: process.platform !== "darwin" }, async (t) => {
+  const binary = await findExecutable("safehouse");
+  assert.ok(binary, "Safehouse must be installed");
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-account-")));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const home = path.join(base, "daemon"), root = path.join(home, "safehouse"), homes = path.join(home, "x", "homes");
+  const [a, b, ws, outside] = [path.join(homes, "a"), path.join(homes, "b"), path.join(base, "workspace"), path.join(base, "outside")];
+  const shared = path.join(home, "x", "shared.txt");
+  for (const dir of [a, b, ws, outside, path.join(root, "snapshots")]) await fs.mkdir(dir, { recursive: true });
+  for (const [file, text] of [[path.join(a, "sentinel"), "A"], [path.join(b, "sentinel"), "B"], [path.join(home, "config.json"), "{}"],
+    [path.join(root, "installation.json"), "{}"], [shared, "S"], [path.join(ws, "ws.txt"), "W"], [path.join(outside, "out.txt"), "X"]])
+    await fs.writeFile(file, text);
+  for (const [name, target] of [["workspace", path.join(ws, "ws.txt")], ["shared", shared], ["other", path.join(b, "sentinel")], ["outside", path.join(outside, "out.txt")]])
+    await fs.symlink(target, path.join(a, `link-${name}`));
+  const listener = http.createServer((_req, res) => res.end("daemon"));
+  listener.listen(0, "127.0.0.1"); await once(listener, "listening");
+  t.after(() => listener.close());
+  const port = (listener.address() as { port: number }).port;
+  const guard = path.join(root, "guard.sb");
+  await fs.writeFile(guard, guardProfile([root], [], []));
+  const names = { claude: ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"], codex: ["CODEX_HOME", "CODEX_SQLITE_HOME"] };
+  for (const [host, accountEnv] of Object.entries(names))
+    await fs.writeFile(path.join(root, `${host}.sh`), renderBootstrap({ root, binary, guard, executable: process.execPath, host, accountEnv }));
+  // Each Off snapshot denies the whole daemon home, as an opening without daemon access does.
+  const offSnapshot = async () => prepareSnapshot(root, await resolvePolicy("", ws, []), guardProfile([home], [], [port]));
+  // The test process may itself run under an account switcher; its values never reach a fixture launch.
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !Object.values(names).flat().includes(name)));
+  const q = JSON.stringify;
+  const probe = (selected: string, other: string) => `const fs=require('node:fs'),net=require('node:net');const r={};
+const a=(k,f)=>{try{r[k]=f()??'allowed'}catch(e){r[k]=e.code}};
+r.env=${q(Object.values(names).flat())}.map(n=>process.env[n]).filter(Boolean);
+a('selected',()=>fs.readFileSync(${q(path.join(selected, "sentinel"))},'utf8'));a('selectedWrite',()=>fs.writeFileSync(${q(path.join(selected, "written"))},'ok'));
+a('resolve',()=>fs.realpathSync.native(${q(selected)}));a('resolveJs',()=>fs.realpathSync(${q(selected)}));
+a('other',()=>fs.readFileSync(${q(path.join(other, "sentinel"))},'utf8'));a('config',()=>fs.readFileSync(${q(path.join(home, "config.json"))},'utf8'));
+a('list',()=>fs.readdirSync(${q(home)}).length);a('plugin',()=>fs.readFileSync(${q(path.join(root, "installation.json"))},'utf8'));
+a('parentWrite',()=>fs.writeFileSync(${q(path.join(homes, "escape"))},'bad'));a('outside',()=>fs.readFileSync(${q(path.join(outside, "out.txt"))},'utf8'));
+for(const l of ['workspace','shared','other','outside'])a('link-'+l,()=>fs.readFileSync(${q(a)}+'/link-'+l,'utf8'));
+const s=net.connect(${port},'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{r.port='allowed';s.destroy()});s.on('error',e=>r.port=e.code);s.on('timeout',()=>{r.port='timeout';s.destroy()});s.on('close',()=>console.log(JSON.stringify(r)));`;
+  const launch = (host: string, snapshot: string, env: Record<string, string>, body = probe(a, b)) =>
+    run("/bin/sh", [path.join(root, `${host}.sh`), "-e", body], { cwd: ws, env: { ...policyEnvironment(inherited, snapshot), ...env }, timeout: 45000 });
+  const denied = { other: "EPERM", config: "EPERM", list: "EPERM", plugin: "EPERM", parentWrite: "EPERM", outside: "EPERM", port: "EPERM" };
+  await t.test("the selected home is usable, other daemon files stay denied, and links reach only allowed targets", async (t) => {
+    const result = JSON.parse((await launch("claude", await offSnapshot(), { CLAUDE_CONFIG_DIR: a, CLAUDE_SECURESTORAGE_CONFIG_DIR: a })).stdout);
+    t.diagnostic(q(result));
+    assert.deepEqual(result, { env: [a, a], selected: "A", selectedWrite: "allowed", resolve: a, resolveJs: a, ...denied,
+      "link-workspace": "W", "link-shared": "EPERM", "link-other": "EPERM", "link-outside": "EPERM" });
+    assert.equal(await fs.readFile(path.join(a, "written"), "utf8"), "ok");
+  });
+  await t.test("two launches write separate account profiles and each reaches only its own home", async (t) => {
+    const snapshot = await offSnapshot(), results = [];
+    for (const [host, selected, other] of [["claude", a, b], ["codex", b, a]]) {
+      const env = Object.fromEntries(names[host as "claude"].map((name) => [name, selected]));
+      results.push(JSON.parse((await launch(host, snapshot, env, probe(selected, other))).stdout));
+    }
+    t.diagnostic(q(results));
+    assert.deepEqual(results.map((r) => [r.env, r.selected, r.other, r.list]), [[[a, a], "A", "EPERM", "EPERM"], [[b, b], "B", "EPERM", "EPERM"]]);
+    const profiles = (await fs.readdir(snapshot)).filter((name) => /^account-\d+\.sb$/.test(name));
+    const grants = await Promise.all(profiles.map(async (name) => (await fs.readFile(path.join(snapshot, name), "utf8")).match(/\(subpath "[^"]*"\)/g)));
+    assert.deepEqual(grants.sort(), [[`(subpath ${q(a)})`], [`(subpath ${q(b)})`]]);
+  });
+  await t.test("a home outside the daemon home passes unchanged without a grant", async () => {
+    const result = JSON.parse((await launch("claude", await offSnapshot(), { CLAUDE_CONFIG_DIR: outside })).stdout);
+    assert.deepEqual([result.env, result.outside, result.selected], [[outside], "EPERM", "EPERM"]);
+  });
+  await t.test("refused values stop the launch before the harness starts", async () => {
+    const snapshot = await offSnapshot();
+    for (const [label, value, message] of [["relative", "x/homes/a", /absolute/], ["missing", path.join(homes, "none"), /existing directory/],
+      ["daemon home", home, /two levels/], ["one level", path.join(home, "x"), /two levels/], ["plugin state", path.join(root, "snapshots"), /Safehouse state/],
+      ["quote", path.join(homes, 'q"q'), /character/], ["backslash", path.join(homes, "b\\s"), /character/],
+      ["tab", path.join(homes, "t\tab"), /character/], ["trailing newline", path.join(homes, "n\n"), /character/]] as const) {
+      if (label !== "relative" && label !== "missing") await fs.mkdir(value, { recursive: true });
+      const failure = await launch("codex", snapshot, { CODEX_SQLITE_HOME: value }).then(() => null, (e) => e);
+      assert.deepEqual([failure?.code, failure?.stdout], [78, ""], label);
+      assert.match(failure.stderr, /CODEX_SQLITE_HOME/, label);
+      assert.match(failure.stderr, message, label);
+    }
+  });
+});
