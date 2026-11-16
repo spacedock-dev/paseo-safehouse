@@ -271,3 +271,39 @@ test("Claude bypass and Pi native modes survive actual adapter create and resume
       assert.equal(PiProviderOptionsSchema.safeParse({ [key]: "never" }).success, false);
   } finally { await created.close(); await resumed.close(); }
 });
+
+test("prepared Claude and Codex launches pass their account names; catalog launches and other bases do not", { skip: process.platform !== "darwin" }, async (t) => {
+  const { configuredProvider } = await import("../server/providers");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "safehouse-account-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const capture = path.join(root, "capture.cjs"), binary = path.join(root, "safehouse"), guard = path.join(root, "guard.sb");
+  await fs.writeFile(capture, "console.log(JSON.stringify(process.argv.slice(2)))");
+  await fs.writeFile(binary, `#!/bin/sh\nexec '${process.execPath}' '${capture}' "$@"\n`, { mode: 0o700 });
+  const snapshot = path.join(root, "snapshots", "prepared"), script = path.join(root, "launch.sh");
+  await fs.mkdir(snapshot, { recursive: true });
+  await fs.writeFile(path.join(snapshot, ".safehouse"), "");
+  const claude = ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"], codex = ["CODEX_HOME", "CODEX_SQLITE_HOME"];
+  const command = [process.execPath];
+  for (const [id, providers, names] of [
+    ["claude", { claude: { command } }, claude],
+    ["codex", { codex: { command, env: { CODEX_HOME: "/configured" } } }, codex],
+    ["work-claude", { "work-claude": { extends: "claude", label: "Work", command } }, claude],
+    ["pi", { pi: { command } }, []],
+    ["copilot", { copilot: { command } }, []],
+  ] as [string, Parameters<typeof configuredProvider>[1], string[]][]) {
+    const configured = await configuredProvider(id, providers);
+    await fs.writeFile(script, renderBootstrap({ root, binary, guard, command: configured.command, host: configured.base, envPass: configured.envPass, accountEnv: configured.accountEnv }));
+    const launch = async (workdir: string): Promise<string[]> => JSON.parse((await run("/bin/sh", [script], { cwd: root, env: { PATH: process.env.PATH!, SAFEHOUSE_WORKDIR: workdir } })).stdout);
+    const catalog = await launch(path.join(root, "catalog")), session = await launch(snapshot);
+    const configuredNames = id === "codex" ? ["CODEX_HOME"] : [];
+    assert.equal(catalog[0], `--env-pass=${[...configuredNames, "PASEO_HOME"].join(",")}`, `${id} catalog`);
+    assert.equal(session[0], `--env-pass=${[...new Set([...configuredNames, "PASEO_HOME", ...names])].join(",")}`, `${id} session`);
+    const profiles = session.filter((arg, i) => session[i - 1] === "--append-profile");
+    assert.deepEqual([profiles.length, profiles.at(-1)], [names.length ? 2 : 1, guard], `${id} profiles`);
+    if (names.length) assert.match(profiles[0].slice(snapshot.length), /^\/account-\d+\.sb$/);
+  }
+  // Reserved names stay filtered even when a caller supplies them as account names.
+  await fs.writeFile(script, renderBootstrap({ root, binary, guard, command, host: "claude", accountEnv: ["PASEO_HOME", "NODE_OPTIONS", "SAFEHOUSE_X", "CLAUDE_CONFIG_DIR"] }));
+  const filtered = JSON.parse((await run("/bin/sh", [script], { cwd: root, env: { PATH: process.env.PATH!, SAFEHOUSE_WORKDIR: snapshot } })).stdout);
+  assert.equal(filtered[0], "--env-pass=PASEO_HOME,CLAUDE_CONFIG_DIR");
+});
