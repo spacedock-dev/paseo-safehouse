@@ -11,6 +11,11 @@ export type ProviderConfig = Providers[string] & {
 // factories preserve adapter behavior when extended under another id.
 const factories = ["pi", "claude", "codex", "copilot", "cursor", "opencode", "omp"];
 const specialAcp = ["cursor", "kimi", "kiro", "traecli", "hub-e2e"];
+// Account switchers set these names at session open. The launcher validates and grants them.
+const accountEnvironment: Record<string, string[]> = {
+  claude: ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"],
+  codex: ["CODEX_HOME", "CODEX_SQLITE_HOME"],
+};
 export const launchError = (id: string, reason: string) => Object.assign(new Error(
   `Safehouse provider ${id}: ${reason}. Repair the reported problem and retry. When a workspace header is available, Disable automatic Safehouse there permits a separate ordinary launch.`,
 ), { name: "SafehouseLaunchError" });
@@ -30,5 +35,6 @@ export async function configuredProvider(id: string, providers: Providers) {
   // Retain source overrides and native base inheritance. Copying merged tool
   // restrictions here would apply the base's restrictions twice in the registry.
   const envPass = providerEnvironmentNames([...Object.keys(providers[base]?.env ?? {}), ...Object.keys(config.env ?? {})]);
-  return { base, config, envPass, command: [executable, ...command.slice(1)] };
+  const accountEnv = providerEnvironmentNames(accountEnvironment[base] ?? []);
+  return { base, config, envPass, accountEnv, command: [executable, ...command.slice(1)] };
 }

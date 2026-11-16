@@ -268,6 +268,22 @@ On permits sandbox escape through the daemon. It does not override restrictive u
 One new agent can get daemon access without changing the workspace setting: create it with the label `paseo-safehouse.paseo-access=daemon`, for example `paseo run --label paseo-safehouse.paseo-access=daemon`. The choice is fixed at creation; later label or metadata changes do not change it, and the agent's workers do not inherit it. Daemon access includes the native Paseo tools as described above. `browser_upload` can pass the browser a host file through a workspace symlink.
 Only the opening with reason `create` reads the value, and it writes `safehouse/agents/<agent-id-hash>.access.json` once with an exclusive link. Later openings read only that record; an agent without one uses the workspace setting. An unknown value, or a label and metadata that differ, fails creation. Effective access is the workspace setting OR `daemon`. Receipts and status record `paseoAccess`, and status compares each agent with its own effective digest.
 
+### Account homes
+
+An account-switching plugin can select an account home at session open. Claude variants pass `CLAUDE_CONFIG_DIR` and `CLAUDE_SECURESTORAGE_CONFIG_DIR`, and Codex variants pass `CODEX_HOME` and `CODEX_SQLITE_HOME`. Other bases, including Pi, pass no account names. Only prepared launches pass them; catalog discovery uses the harness's default home.
+The opening hook cannot see these values, because Paseo runs opening hooks in plugin-id order and a switcher can run after Safehouse. The host-side launcher therefore checks each non-empty value before it starts Safehouse:
+
+1. The value must be an absolute path to an existing directory. The launcher resolves it with `cd -P` and `pwd -P`.
+2. The resolved path cannot contain `"`, `\` or control characters, because it goes into a Seatbelt string.
+3. A path in `<daemon home>/safehouse`, the daemon home itself, or a directory one level below the daemon home stops the launch.
+4. A path at least two levels below the daemon home gets a read and write grant for its subtree, and metadata-only grants for each ancestor up to the daemon home. Codex resolves the path and needs this metadata. Metadata does not permit a listing.
+5. A path outside the daemon home passes without a grant. Policy and the Safehouse harness profiles decide its access.
+
+A failure stops the launch with exit 78 and names the variable. The launcher passes the values unchanged. It writes the grants to `account-<pid>.sb` in the protected snapshot and appends that profile after the snapshot's Off deny and before the fixed guard, so plugin state stays denied. An `--add-dirs` grant would lose to the Off deny.
+The grant does not follow links. A link inside the home reaches its target only when policy already allows the target. With Off, links to shared files elsewhere in the daemon home stay denied; a switcher that keeps shared files there needs daemon access On.
+The two-level rule stops a grant of the whole home or of Paseo's top-level state. It does not identify every directory that Paseo owns: a trusted source that names a directory such as `<home>/agents/<name>` receives that subtree. Values come only from provider configuration, Paseo and enabled plugins.
+Each launch reads the values at that opening, so a new session after a switch gets only the new home. Running sessions keep their grant. Existing installations require **Refresh providers**; older launchers drop the account variables.
+
 ### Provider discovery
 
 The ordinary provider supplies the picker’s model catalog before workspace routing occurs.

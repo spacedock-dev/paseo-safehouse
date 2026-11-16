@@ -295,7 +295,7 @@ async function setupLocked(
   const sources: Record<string, Source> = { ...old?.sources };
   const unavailable: Record<string, string> = {};
   const bootstraps: { file: string; text: string }[] = [];
-  const wrappers: { host: string; base: string; config: ProviderConfig; command: string[]; envPass: string[] }[] = [];
+  const wrappers: { host: string; base: string; config: ProviderConfig; command: string[]; envPass: string[]; accountEnv: string[] }[] = [];
   const protectedPaths = [
     details.source,
     binary,
@@ -308,7 +308,7 @@ async function setupLocked(
     let resolved;
     try { resolved = await configuredProvider(host, current); }
     catch (e) { unavailable[host] = e instanceof Error ? e.message : String(e); continue; }
-    const { base, config, command, envPass } = resolved;
+    const { base, config, command, envPass, accountEnv } = resolved;
     const executable = command[0];
     const id = variant(host);
     if (current[id] && !isDeepStrictEqual(current[id], old?.entries[id]))
@@ -316,7 +316,7 @@ async function setupLocked(
         `Provider ${id} belongs to another configuration. It was not changed.`,
       );
     protectedPaths.push(executable, await fs.realpath(executable));
-    wrappers.push({ host, base, config, command, envPass });
+    wrappers.push({ host, base, config, command, envPass, accountEnv });
     sources[id] = { provider: host, base, source: current[host] ?? null, baseSource: current[base] ?? null };
   }
   for (const [id, source] of Object.entries(sources)) {
@@ -337,8 +337,8 @@ async function setupLocked(
   const guard = path.join(root, `guard-${hash(guardText).slice(0, 16)}.sb`);
   const catalogText = guardText + guardProfile(endpoints.homes, [], endpoints.ports);
   const catalogGuard = path.join(root, `catalog-${hash(catalogText).slice(0, 16)}.sb`);
-  for (const { host, base, config, command, envPass } of wrappers) {
-    const text = renderBootstrap({ root, binary, guard, catalogGuard, command, host: base, piCatalogExtensions, envPass });
+  for (const { host, base, config, command, envPass, accountEnv } of wrappers) {
+    const text = renderBootstrap({ root, binary, guard, catalogGuard, command, host: base, piCatalogExtensions, envPass, accountEnv });
     const file = path.join(root, "launchers", `${hash(host).slice(0, 16)}-${hash(text).slice(0, 16)}.sh`);
     bootstraps.push({ file, text });
     const retainedMasks = Object.fromEntries(Object.entries(old?.entries[variant(host)]?.env ?? {})

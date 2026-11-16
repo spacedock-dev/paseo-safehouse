@@ -290,7 +290,7 @@ test("prepared Claude and Codex launches pass their account names; catalog launc
     ["work-claude", { "work-claude": { extends: "claude", label: "Work", command } }, claude],
     ["pi", { pi: { command } }, []],
     ["copilot", { copilot: { command } }, []],
-  ] as [string, Record<string, object>, string[]][]) {
+  ] as [string, Parameters<typeof configuredProvider>[1], string[]][]) {
     const configured = await configuredProvider(id, providers);
     await fs.writeFile(script, renderBootstrap({ root, binary, guard, command: configured.command, host: configured.base, envPass: configured.envPass, accountEnv: configured.accountEnv }));
     const launch = async (workdir: string): Promise<string[]> => JSON.parse((await run("/bin/sh", [script], { cwd: root, env: { PATH: process.env.PATH!, SAFEHOUSE_WORKDIR: workdir } })).stdout);
