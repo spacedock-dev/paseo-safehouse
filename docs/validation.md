@@ -74,11 +74,12 @@ On a host without the launch wrapper, for example Paseo 0.16.1:
 1. Claude and Codex agents run on `safehouse-*` and complete a turn.
 2. Antigravity is refused with `antigravity is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed.`
 
-On a host with the launch wrapper and the plugin requirement, an Antigravity agent must:
+On a host with the launch wrapper, an Antigravity agent must:
 1. Run `agy` under the Safehouse wrap, with the provider, executable and guard profiles, and complete a turn.
 2. Be denied the daemon port and the Safehouse state.
-3. Return the same wrap on resume.
-4. Refuse to open with `required_plugin_inactive` after Safehouse is disabled.
+3. Return the same wrap on resume and reload.
+
+Where the host also offers the plugin requirement, the agent must refuse to open with `required_plugin_inactive` after Safehouse is disabled.
 
 Offline, `test/launch-wrap.test.ts` checks route selection, the route record and the launcher. Set `PASEO_LAUNCH_WRAP_SERVER` to a built Paseo server with the launch wrapper to validate the open result with its schema.
 `test/sandbox.mac.test.ts` runs the wrap launcher under the installed Safehouse.

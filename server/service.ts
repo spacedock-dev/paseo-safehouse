@@ -491,11 +491,9 @@ export async function routeCreation(request: CreateRequest, paseo: Paseo) {
   const host = installed?.sources?.[provider]?.base ?? (selected ? native(provider) : request.config.provider);
   if (!installed?.entries[provider] || !host) {
     const providers = (await paseo.config.get()).config.providers ?? {};
-    // A provider that cannot be derived uses the launch wrap only where the host offers both features.
-    // Without the plugin requirement, a wrapped agent would reopen unwrapped once Safehouse is inactive.
+    // A provider that cannot be derived uses the launch wrap where its host reports support.
     if (!selected && !derivedBase(request.config.provider, providers)) {
-      if (!hostOffersPluginRequirement(request) || !(await launchWrapSupported(paseo, request.config.provider, cwd)))
-        throw unsupportedError(request.config.provider);
+      if (!(await launchWrapSupported(paseo, request.config.provider, cwd))) throw unsupportedError(request.config.provider);
       return wrapCreation(request, paseo, cwd, recover);
     }
     await recover(configuredProvider(request.config.provider, providers));
@@ -539,10 +537,10 @@ export async function routeCreation(request: CreateRequest, paseo: Paseo) {
  * Host support for the plugin requirement. Keep this the only place that reads the signal.
  *
  * ASSUMPTION: the Paseo task plugin-required-active is not final. It plans `requirePlugin: true` in the
- * agent.create.before result, and its strict schema makes an older host fail creation on that key. This
+ * agent.create.before result, and a strict create schema without it fails creation on that key. This
  * plugin assumes that a supporting host includes `requirePlugin` as a boolean in every create request.
  * If Paseo chooses another signal, change only this function. With no signal, it returns false and the
- * wrap route is never offered.
+ * create result never carries `requirePlugin`.
  */
 function hostOffersPluginRequirement(request: CreateRequest) {
   return typeof request.requirePlugin === "boolean";
@@ -555,8 +553,9 @@ async function wrapCreation(request: CreateRequest, paseo: Paseo, cwd: string, r
   return {
     ...request,
     metadata: { ...request.metadata, [routeMetadataKey]: "wrap" },
-    // Paseo refuses every later open while Safehouse is inactive, so a lost plugin cannot reopen the agent unwrapped.
-    requirePlugin: true,
+    // Where offered, Paseo refuses every later open while Safehouse is inactive, so a lost plugin cannot
+    // reopen the agent unwrapped. Without it, that open starts the harness unsandboxed (CL's ruling, 2026-11-21).
+    ...(hostOffersPluginRequirement(request) ? { requirePlugin: true } : {}),
   };
 }
 async function prepareWrappedOpening(request: PluginSessionOpenRequest, paseo: Paseo) {

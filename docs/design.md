@@ -176,19 +176,17 @@ On a host with a per-session launch wrapper, Safehouse wraps their sessions inst
 With automatic Safehouse on, creation selects the first route that applies:
 
 1. **Derived route.** A provider with a derivable base uses `safehouse-<id>`, as described above. Codex always takes this route, even when its host can wrap it.
-2. **Wrap route.** All three conditions must hold:
-   - the provider cannot be derived;
-   - its `paseo.providers.snapshot()` entry has `launchWrap: true`;
-   - the host offers the plugin requirement.
+2. **Wrap route.** The provider cannot be derived, and its `paseo.providers.snapshot()` entry has `launchWrap: true`.
 3. **Refusal.** Otherwise creation fails with the refusal text above.
 
 Host support comes only from static data: the provider snapshot and the create request. A failed snapshot read counts as no support.
-The plugin requirement is not final in Paseo. Safehouse treats a boolean `requirePlugin` in the `agent.create.before` request as support.
-`hostOffersPluginRequirement` in `server/service.ts` is the only check of this signal.
-Without the requirement, a disabled Safehouse would drop out of the hook list, and the next open would start the harness unwrapped. The wrap route is therefore never offered without it.
 
 On the wrap route, creation keeps the provider ID and configuration.
-It validates the installation, policy and daemon access record, then returns `requirePlugin: true` and the metadata marker `paseo-safehouse.route: "wrap"`.
+It validates the installation, policy and daemon access record, then adds the metadata marker `paseo-safehouse.route: "wrap"`.
+Where the host offers the plugin requirement, creation also returns `requirePlugin: true`. Paseo then refuses to open the agent while Safehouse is inactive.
+The plugin requirement is not final in Paseo. Safehouse treats a boolean `requirePlugin` in the `agent.create.before` request as support.
+`hostOffersPluginRequirement` in `server/service.ts` is the only check of this signal.
+A host without the signal rejects an unknown create key, so Safehouse then returns no `requirePlugin`.
 The creation open writes `agents/<hash>.route.json` once, by hard link, and never replaces it.
 Every later open of that agent reads the record, including resume and history opens. A record for another provider, or a corrupt record, fails the open.
 Metadata alone never wraps an agent, so an agent without a record opens as before.
@@ -220,7 +218,7 @@ The wrap route has these limits:
 - **Work before the open hook is not wrapped.** This includes draft command and control discovery, and the catalog lookup during creation without a model. For Antigravity, the ACP initialize probe during creation runs unwrapped.
 - **Host operations are not wrapped.** These include usage queries, version checks and availability probes.
 - **Existing agents are never wrapped retroactively.** They have no route record and no plugin requirement.
-- **Plugin loss is covered only by the plugin requirement.** Paseo refuses to open a wrapped agent while Safehouse is inactive.
+- **On a host without the plugin requirement, plugin loss removes the sandbox.** If the Safehouse plugin is disabled, removed or crashes, the next open of a wrapped agent starts its harness unsandboxed, and Paseo shows no error. On a host with the requirement, Paseo refuses that open instead.
 - **A provider without a `wrapGrants` entry may fail to sign in.** This applies to Goose, Fx and Hoplite.
 - **There is no account-home passthrough** on the wrap route.
 
@@ -422,7 +420,7 @@ These improvements are outside the first beta requirements.
 | Opportunity | Useful upstream API | Current approach or limitation |
 | --- | --- | --- |
 | Per-draft Safehouse choice and readiness | Creation-form contribution with persisted, namespaced draft values | Workspace header menu governs subsequent launches across clients. See [launch controls](launch-controls.md). |
-| Safe launch for additional provider adapters | Session launch wrapper together with a plugin requirement | Used for plugin-supplied providers when the host reports both. Discovery and host operations stay unwrapped. |
+| Safe launch for additional provider adapters | Session launch wrapper, with a plugin requirement | Used for plugin-supplied providers when the host reports the wrapper. Without the requirement, plugin loss reopens wrapped agents unsandboxed. Discovery and host operations stay unwrapped. |
 | Consistent discovery lifecycle | Catalog hook with explicit configuration and launch context | Protected bootstrap handles discovery separately from session opening. |
 | Final external-capability visibility | Final merged MCP/tool inventory and an optional veto | Disclose external authority; hook-local maps cannot establish global filtering. |
 | Permission changes during reopen | Supported mutation of effective provider options before resume | Persist compatible creation options and test native resume. |

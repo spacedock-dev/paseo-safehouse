@@ -189,7 +189,7 @@ export function SafehousePanel({
         services can provide access outside that sandbox.
       </Text>
       <Text style={muted}>
-        Plugin providers such as Antigravity use Safehouse only when the host can wrap their sessions and require this plugin. Keep daemon access Off for them. Discovery and host checks run outside the sandbox.
+        Plugin providers such as Antigravity use Safehouse only when the host can wrap their sessions. Unless the host requires this plugin, they reopen unsandboxed if Safehouse is disabled, removed or crashes. Keep daemon access Off for them. Discovery and host checks run outside the sandbox.
       </Text>
       {error || routingError ? (
         <Text
