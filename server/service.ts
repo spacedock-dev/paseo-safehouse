@@ -11,7 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { z } from "zod";
 import type { availabilitySchema } from "../shared/contracts";
 import { renderBootstrap } from "./launch";
-import { finishPending, savePending, serializeSetup, validateInstallation } from "./setup";
+import { finishPending, pluginOwned, sameEntry, savePending, sameSource, serializeSetup, userOwned, validateInstallation } from "./setup";
 import { configuredProvider, launchError, type ProviderConfig } from "./providers";
 import {
   atomicJson,
@@ -311,7 +311,7 @@ async function setupLocked(
     const { base, config, command, envPass, accountEnv } = resolved;
     const executable = command[0];
     const id = variant(host);
-    if (current[id] && !isDeepStrictEqual(current[id], old?.entries[id]))
+    if (current[id] && !sameEntry(current[id], old?.entries[id]))
       throw new Error(
         `Provider ${id} belongs to another configuration. It was not changed.`,
       );
@@ -343,14 +343,17 @@ async function setupLocked(
     bootstraps.push({ file, text });
     const retainedMasks = Object.fromEntries(Object.entries(old?.entries[variant(host)]?.env ?? {})
       .filter(([name, value]) => value === "" && blockedEnvironmentName(name)));
-    entries[variant(host)] = { ...config, extends: base,
+    const built: Variant = { ...config, extends: base,
       label: `${host === "pi" ? "Pi" : host[0].toUpperCase() + host.slice(1)} · Safehouse`,
       command: ["/bin/sh", file], env: { ...retainedMasks, ...policyEnvironment(config.env ?? {}, path.join(root, "catalog")) },
       // Follow the source policy. Paseo treats an absent enabled as true; writing it lets refresh replace a stored false.
       paseoTools: { ...config.paseoTools, enabled: config.paseoTools?.enabled !== false } };
+    // A new entry inherits the source's user fields. A rewrite keeps the user's live values.
+    const live = current[variant(host)];
+    entries[variant(host)] = live ? { ...pluginOwned(built) as Variant, ...userOwned(live) } : built;
   }
   for (const id of Object.keys(entries))
-    if (!isDeepStrictEqual(current[id] ?? null, old?.entries[id] ?? null))
+    if (!sameEntry(current[id], old?.entries[id]))
       throw new Error(`Provider ${id} belongs to another configuration. It was not changed.`);
   await savePending(root, {
     installation: { binary, ...caps, ...details, entries, sources, unavailable, guard, catalogGuard, piCatalogExtensions },
@@ -378,12 +381,12 @@ async function ready(paseo: Paseo, provider?: string) {
     const source = saved.sources?.[provider];
     if (source && saved.unavailable?.[source.provider])
       throw launchError(source.provider, "source is unavailable; restore it and use Refresh providers in the Safehouse panel");
-    if (source && (!isDeepStrictEqual(current[source.provider] ?? null, source.source) ||
-        !isDeepStrictEqual(current[source.base] ?? null, source.baseSource)))
+    if (source && (!sameSource(current[source.provider], source.source) ||
+        !sameSource(current[source.base], source.baseSource)))
       throw launchError(source.provider, "configuration changed; use Refresh providers in the Safehouse panel");
     if (
       !saved.entries[provider] ||
-      !isDeepStrictEqual(entry, saved.entries[provider])
+      !sameEntry(entry, saved.entries[provider])
     )
       throw new Error(
         "Safehouse provider configuration changed. Review host setup before launch.",
@@ -543,9 +546,8 @@ export async function status(paseo: Paseo, workspaceId: string) {
     configured = Object.entries(saved.entries).every(([id, entry]) => {
       const source = saved.sources?.[id];
       if (source && saved.unavailable?.[source.provider]) return true;
-      return isDeepStrictEqual(providers[id], entry) && (!source || (
-        isDeepStrictEqual(providers[source.provider] ?? null, source.source) &&
-        isDeepStrictEqual(providers[source.base] ?? null, source.baseSource)));
+      return sameEntry(providers[id], entry) && (!source || (
+        sameSource(providers[source.provider], source.source) && sameSource(providers[source.base], source.baseSource)));
     });
   }
   configured = configured && executable.availability === "available" && executable.binary === saved?.binary;

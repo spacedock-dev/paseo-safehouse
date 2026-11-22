@@ -41,11 +41,127 @@ async function fixture(t: any) {
   return { dir, home, bin, host, get, initial, configFile, patches: () => patches, root: path.join(home, "safehouse") };
 }
 
-test("setup recovers an applied patch with a lost response in a fresh process", { skip: process.platform !== "darwin" }, async (t) => {
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+const mac = { skip: process.platform !== "darwin" };
+// The Paseo provider settings send config.patch({ providers: { [id]: { enabled } } }) outside setup.
+const userPatch = async (f: Fixture, providers: Record<string, unknown>) =>
+  fs.writeFile(f.configFile, JSON.stringify(merge(await f.get(), { providers })));
+const launch = (f: Fixture, provider: string) => prepareOpening({ agentId: `toggle-${provider}`, provider, cwd: f.dir, reason: "create",
+  workspaceId: "workspace", purpose: "interactive", title: null, labels: {}, env: {}, tools: [], mcpServers: {} } as Parameters<typeof prepareOpening>[0], f.host);
+const recorded = async (f: Fixture) => fs.readFile(path.join(f.root, "installation.json"), "utf8");
+
+for (const [field, value] of [["enabled", false], ["order", 3]] as const) {
+  test(`Refresh providers keeps a user-set wrapper ${field}`, mac, async t => {
+    const f = await fixture(t);
+    await setup(f.host);
+    await userPatch(f, { "safehouse-pi": { [field]: value } });
+    await setup(f.host);
+    assert.equal((await f.get()).providers["safehouse-pi"][field], value);
+  });
+}
+
+test("a wrapper disabled and enabled again launches without Refresh providers", mac, async t => {
+  const f = await fixture(t);
+  await setup(f.host);
+  await userPatch(f, { "safehouse-pi": { enabled: false } });
+  await userPatch(f, { "safehouse-pi": { enabled: true } });
+  assert.ok((await launch(f, "safehouse-pi")).env.SAFEHOUSE_WORKDIR);
+});
+
+// pi-sd is a configured source, pi a recorded built-in, and claude a built-in without a config entry.
+for (const source of ["pi-sd", "pi", "claude"]) {
+  test(`a disabled ${source} source keeps its wrapper launchable and configured`, mac, async t => {
+    const f = await fixture(t);
+    await fs.writeFile(path.join(f.bin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    await userPatch(f, { "pi-sd": { extends: "pi", label: "Pi SD", command: ["pi"] } });
+    Object.assign(f.host, { workspaces: { ref: () => ({ refresh: async () => ({ workspaceDirectory: f.dir }) }) }, agents: { list: async () => ({ entries: [] }) } });
+    await setup(f.host);
+    await userPatch(f, { [source]: { enabled: false } });
+    assert.ok((await launch(f, `safehouse-${source}`)).env.SAFEHOUSE_WORKDIR);
+    assert.equal((await status(f.host, "workspace")).configured, true);
+  });
+}
+
+test("Refresh providers does not copy a disabled source's enabled into an existing wrapper", mac, async t => {
+  const f = await fixture(t);
+  await userPatch(f, { "pi-sd": { extends: "pi", label: "Pi SD", command: ["pi"], enabled: false } });
+  await setup(f.host);
+  assert.equal((await f.get()).providers["safehouse-pi-sd"].enabled, false); // A new wrapper inherits the source's value.
+  // The source change makes Refresh providers patch the wrapper.
+  await userPatch(f, { "safehouse-pi-sd": { enabled: true }, "pi-sd": { env: { ADDED: "1" } } });
+  await setup(f.host);
+  assert.equal((await f.get()).providers["safehouse-pi-sd"].env.ADDED, "1");
+  assert.equal((await f.get()).providers["safehouse-pi-sd"].enabled, true);
+  assert.ok((await launch(f, "safehouse-pi-sd")).env.SAFEHOUSE_WORKDIR);
+});
+
+const foreign = { command: ["/bin/sh", "/tmp/other.sh"], extends: "claude", label: "Edited", env: { EXTRA: "1" }, paseoTools: { enabled: false } };
+for (const [field, value] of Object.entries(foreign)) {
+  test(`Refresh providers and launch refuse a disabled wrapper with a changed ${field}`, mac, async t => {
+    const f = await fixture(t);
+    await setup(f.host);
+    await userPatch(f, { "safehouse-pi": { [field]: value, enabled: false } });
+    const before = await f.get(), record = await recorded(f), count = f.patches();
+    await assert.rejects(setup(f.host), /Provider safehouse-pi belongs to another configuration/);
+    assert.equal(f.patches(), count);
+    assert.deepEqual(await f.get(), before);
+    assert.equal(await recorded(f), record);
+    await assert.rejects(launch(f, "safehouse-pi"), /configuration changed/);
+  });
+}
+
+test("Refresh providers refuses an unrecorded wrapper that holds only a toggle", mac, async t => {
+  const f = await fixture(t);
+  await userPatch(f, { "safehouse-pi": { enabled: false } });
+  const before = await f.get();
+  await assert.rejects(setup(f.host), /Provider safehouse-pi belongs to another configuration/);
+  assert.equal(f.patches(), 0);
+  assert.deepEqual(await f.get(), before);
+});
+
+for (const [field, value] of [["enabled", false], ["order", 3]] as const) {
+  test(`Refresh providers keeps a user-set ${field} on a wrapper whose source is unavailable`, mac, async t => {
+    const f = await fixture(t);
+    await userPatch(f, { "pi-sd": { extends: "pi", label: "Pi SD", command: ["pi"] } });
+    await setup(f.host);
+    await userPatch(f, { "safehouse-pi-sd": { [field]: value } });
+    const config = await f.get();
+    delete config.providers["pi-sd"];
+    await fs.writeFile(f.configFile, JSON.stringify(config));
+    await setup(f.host);
+    assert.ok(JSON.parse(await recorded(f)).unavailable["pi-sd"]);
+    assert.equal((await f.get()).providers["safehouse-pi-sd"][field], value);
+    // A changed plugin-owned field on the retained wrapper is still refused.
+    await userPatch(f, { "safehouse-pi-sd": { label: "Edited" } });
+    const before = await f.get(), record = await recorded(f), count = f.patches();
+    await assert.rejects(setup(f.host), /Provider safehouse-pi-sd belongs to another configuration/);
+    assert.equal(f.patches(), count);
+    assert.deepEqual(await f.get(), before);
+    assert.equal(await recorded(f), record);
+  });
+}
+
+test("pending setup recovery does not overwrite a toggle made before its patch", mac, async t => {
+  const f = await fixture(t), apply = f.host.config.patch;
+  await setup(f.host);
+  await userPatch(f, { "safehouse-pi": { enabled: false }, pi: { env: { ADDED: "1" } } });
+  f.host.config.patch = async () => { throw new Error("before apply"); };
+  await assert.rejects(setup(f.host), /before apply/);
+  f.host.config.patch = apply;
+  await userPatch(f, { "safehouse-pi": { enabled: true } });
+  await setup(f.host);
+  const wrapper = (await f.get()).providers["safehouse-pi"];
+  assert.equal(wrapper.env.ADDED, "1");
+  assert.equal(wrapper.enabled, true);
+});
+
+for (const toggle of [false, true])
+test(`setup recovers an applied patch with a lost response in a fresh process${toggle ? " after a toggle" : ""}`, { skip: process.platform !== "darwin" }, async (t) => {
   const f = await fixture(t);
   const apply = f.host.config.patch;
   f.host.config.patch = async (patch) => { await apply(patch); throw new Error("lost setup response"); };
   await assert.rejects(setup(f.host), /lost setup response/);
+  if (toggle) await userPatch(f, { "safehouse-pi": { enabled: false } });
   const retry = path.join(f.dir, "retry.mts");
   await fs.writeFile(retry, `import * as fs from 'node:fs/promises';
 import { setup, status, prepareOpening } from ${JSON.stringify(path.join(process.cwd(), "server/service.ts"))};
@@ -56,7 +172,7 @@ await setup({config:{get:async()=>({config:JSON.parse(await fs.readFile(file,'ut
   await run(process.execPath, ["--import", "tsx", retry], { cwd: process.cwd(), env: process.env });
   const saved = JSON.parse(await fs.readFile(path.join(f.root, "installation.json"), "utf8"));
   const current = await f.get();
-  assert.deepEqual(current.providers["safehouse-pi"], saved.entries["safehouse-pi"]);
+  assert.deepEqual(current.providers["safehouse-pi"], { ...saved.entries["safehouse-pi"], ...toggle ? { enabled: false } : {} });
   assert.equal(current.providers["safehouse-pi"].paseoTools.enabled, true);
   assert.equal(current.providers.pi.paseoTools.enabled, true);
   assert.deepEqual(current.providers.pi, f.initial.providers.pi);

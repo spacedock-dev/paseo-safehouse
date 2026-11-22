@@ -23,6 +23,18 @@ export function validateInstallation(value: unknown): Installation {
   if (!installed.safeParse(value).success) throw new Error("Invalid installation.json; review protected setup state.");
   return value as Installation;
 }
+// Paseo's provider settings write these fields. They do not change a launch,
+// so a comparison with a recorded Safehouse entry ignores them.
+const userFields = ["enabled", "order"];
+export function pluginOwned(entry: unknown) {
+  if (!entry || typeof entry !== "object") return entry ?? null;
+  return Object.fromEntries(Object.entries(entry).filter(([key]) => !userFields.includes(key)));
+}
+export const userOwned = (entry: unknown) => entry && typeof entry === "object"
+  ? Object.fromEntries(Object.entries(entry).filter(([key]) => userFields.includes(key))) : {};
+export const sameEntry = (a: unknown, b: unknown) => equal(pluginOwned(a), pluginOwned(b));
+// An absent built-in source has the same configuration as an empty entry, such as a bare toggle.
+export const sameSource = (a: unknown, b: unknown) => sameEntry(a ?? {}, b ?? {});
 export type Pending = {
   installation: Installation;
   previous: Record<string, unknown>;
@@ -37,7 +49,7 @@ function merge(previous: any, patch: any): any {
 }
 export function checkRepresentable(plan: Pending) {
   for (const [id, entry] of Object.entries(plan.installation.entries))
-    if (!equal(merge(plan.previous[id], entry), entry))
+    if (!sameEntry(merge(plan.previous[id], entry), entry))
       throw new Error(`Provider ${id} refresh requires nested field removal unsupported by config.patch. Previous configuration remains intact.`);
 }
 export async function savePending(root: string, plan: Pending) {
@@ -59,10 +71,10 @@ export async function finishPending(root: string, paseo: PluginHandlerContext["p
   checkRepresentable(plan);
   const check = (current: Record<string, unknown>, exact = false) => {
     for (const [id, entry] of Object.entries(saved.entries))
-      if (!equal(current[id] ?? null, entry) && (exact || !equal(current[id] ?? null, plan.previous[id])))
+      if (!sameEntry(current[id], entry) && (exact || !sameEntry(current[id], plan.previous[id])))
         throw new Error(`Provider ${id} conflicts with pending setup. It was not adopted.`);
     for (const source of Object.values(saved.sources!))
-      if (!equal(current[source.provider] ?? null, source.source) || !equal(current[source.base] ?? null, source.baseSource))
+      if (!sameSource(current[source.provider], source.source) || !sameSource(current[source.base], source.baseSource))
         throw new Error(`Provider ${source.provider} source changed during pending setup. Preserve pending setup for review.`);
   };
   check((await paseo.config.get()).config.providers ?? {});
@@ -76,7 +88,8 @@ export async function finishPending(root: string, paseo: PluginHandlerContext["p
   }
   const current = (await paseo.config.get()).config.providers ?? {};
   check(current);
-  const changes = Object.fromEntries(Object.entries(saved.entries).filter(([id, entry]) => !equal(current[id], entry)));
+  const changes = Object.fromEntries(Object.entries(saved.entries).filter(([id, entry]) => !sameEntry(current[id], entry))
+    .map(([id, entry]) => [id, { ...entry, ...userOwned(current[id]) }]));
   if (Object.keys(changes).length) await paseo.config.patch({ providers: changes });
   check((await paseo.config.get()).config.providers ?? {}, true);
   for (const file of plan.files)
