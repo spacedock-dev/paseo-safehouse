@@ -49,7 +49,7 @@ function merge(previous: any, patch: any): any {
 }
 export function checkRepresentable(plan: Pending) {
   for (const [id, entry] of Object.entries(plan.installation.entries))
-    if (!equal(merge(plan.previous[id], entry), entry))
+    if (!sameEntry(merge(plan.previous[id], entry), entry))
       throw new Error(`Provider ${id} refresh requires nested field removal unsupported by config.patch. Previous configuration remains intact.`);
 }
 export async function savePending(root: string, plan: Pending) {
