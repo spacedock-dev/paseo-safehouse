@@ -119,6 +119,28 @@ test("Refresh providers refuses an unrecorded wrapper that holds only a toggle",
   assert.deepEqual(await f.get(), before);
 });
 
+for (const [field, value] of [["enabled", false], ["order", 3]] as const) {
+  test(`Refresh providers keeps a user-set ${field} on a wrapper whose source is unavailable`, mac, async t => {
+    const f = await fixture(t);
+    await userPatch(f, { "pi-sd": { extends: "pi", label: "Pi SD", command: ["pi"] } });
+    await setup(f.host);
+    await userPatch(f, { "safehouse-pi-sd": { [field]: value } });
+    const config = await f.get();
+    delete config.providers["pi-sd"];
+    await fs.writeFile(f.configFile, JSON.stringify(config));
+    await setup(f.host);
+    assert.ok(JSON.parse(await recorded(f)).unavailable["pi-sd"]);
+    assert.equal((await f.get()).providers["safehouse-pi-sd"][field], value);
+    // A changed plugin-owned field on the retained wrapper is still refused.
+    await userPatch(f, { "safehouse-pi-sd": { label: "Edited" } });
+    const before = await f.get(), record = await recorded(f), count = f.patches();
+    await assert.rejects(setup(f.host), /Provider safehouse-pi-sd belongs to another configuration/);
+    assert.equal(f.patches(), count);
+    assert.deepEqual(await f.get(), before);
+    assert.equal(await recorded(f), record);
+  });
+}
+
 test("pending setup recovery does not overwrite a toggle made before its patch", mac, async t => {
   const f = await fixture(t), apply = f.host.config.patch;
   await setup(f.host);
