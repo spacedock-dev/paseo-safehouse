@@ -4,6 +4,7 @@ import type {
   PluginSessionOpenRequest,
 } from "@getpaseo/plugin/server";
 import * as fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { homedir } from "node:os";
@@ -45,7 +46,11 @@ export const native = (provider: string) =>
   HOSTS.find((host) => variant(host) === provider);
 export const daemonHome = () =>
   path.resolve(process.env.PASEO_HOME || path.join(homedir(), ".paseo"));
-export const stateRoot = () => path.join(daemonHome(), "safehouse");
+// Launchers compare SAFEHOUSE_WORKDIR with the canonical state root as a string. Every state path uses that spelling.
+export const stateRoot = () => {
+  try { return path.join(realpathSync(daemonHome()), "safehouse"); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return path.join(daemonHome(), "safehouse"); throw e; }
+};
 type Variant = ProviderConfig;
 type Source = { provider: string; base: string; source: ProviderConfig | null; baseSource: ProviderConfig | null };
 export type Installation = {
