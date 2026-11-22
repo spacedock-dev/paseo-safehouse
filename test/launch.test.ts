@@ -142,9 +142,12 @@ test("configured providers retain adapter, inherited configuration and literal c
   for (const [id, config] of Object.entries({
     plugin: { command: [process.execPath] },
     child: { extends: "custom", command: [process.execPath] },
+    kimi: { extends: "acp", command: [process.execPath] },
+  })) await assert.rejects(configuredProvider(id, { ...providers, [id]: config }),
+    new RegExp(`^SafehouseLaunchError: ${id} is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed\\.$`));
+  for (const [id, config] of Object.entries({
     malformed: { extends: "acp", command: [] },
     missing: { extends: "acp", command: ["/does-not-exist"] },
-    kimi: { extends: "acp", command: [process.execPath] },
   })) await assert.rejects(configuredProvider(id, { ...providers, [id]: config }), /Disable automatic Safehouse/);
 });
 
