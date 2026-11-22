@@ -66,6 +66,24 @@ Acceptance requires:
 Claude, Codex, and Pi require the same boundary evidence through their own launch paths.
 Chat success alone does not establish sandbox enforcement.
 
+## Plugin-supplied provider acceptance
+
+Use isolated daemons and disposable workspaces with automatic Safehouse on.
+
+On a host without the launch wrapper, for example Paseo 0.16.1:
+1. Claude and Codex agents run on `safehouse-*` and complete a turn.
+2. Antigravity is refused with `antigravity is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed.`
+
+On a host with the launch wrapper, an Antigravity agent must:
+1. Run `agy` under the Safehouse wrap, with the provider, executable and guard profiles, and complete a turn.
+2. Be denied the daemon port and the Safehouse state.
+3. Return the same wrap on resume and reload.
+
+Where the host also offers the plugin requirement, the agent must refuse to open with `required_plugin_inactive` after Safehouse is disabled.
+
+Offline, `test/launch-wrap.test.ts` checks route selection, the route record and the launcher. Set `PASEO_LAUNCH_WRAP_SERVER` to a built Paseo server with the launch wrapper to validate the open result with its schema.
+`test/sandbox.mac.test.ts` runs the wrap launcher under the installed Safehouse.
+
 ## Repeatable probes
 
 Run `npm run typecheck` and `npm test` with a working Node installation and an installed Safehouse binary.

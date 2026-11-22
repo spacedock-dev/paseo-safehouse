@@ -159,13 +159,74 @@ Explicit command arrays support built-in factories and direct derivatives of tho
 A derived variant extends the same built-in and retains source overrides, including native environment and tool-restriction inheritance.
 Generic custom ACP variants retain `extends: "acp"`. Identity-specific ACP adapters fail explicitly.
 The small factory compatibility list reflects Paseo 0.15.3. The public API has no factory-capability query.
-Plugin adapters, ambiguous inheritance, unavailable executables, and missing commands outside Pi/Claude/Codex defaults fail before execution.
+Ambiguous inheritance, unavailable executables, and missing commands outside Pi/Claude/Codex defaults fail before execution.
+A provider that cannot be derived, such as a plugin-supplied adapter, uses the launch-wrap route when the host supports it.
+Otherwise creation fails with `<provider> is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed.` The panel lists the same text.
 The installation records source and base configuration. Drift blocks launch with an instruction to configure Safehouse again.
 Setup retains owned variants for existing agents. Ownership comes from the protected installation record, not the provider suffix.
 Paseo’s provider settings own the `enabled` and `order` fields of an owned entry, so ownership and drift checks ignore them and Refresh providers keeps the user’s values.
 The variant’s default environment selects restricted catalog discovery.
 Prepared launches require an existing snapshot directly beneath the plugin’s snapshot directory.
 Missing or malformed environment values fail before the harness starts.
+
+### Plugin-supplied providers
+
+Paseo plugins can register providers, for example `antigravity`, `muse`, `fx`, `hoplite` and `goose`.
+These providers cannot be extended, so no `safehouse-<id>` variant exists for them.
+On a host with a per-session launch wrapper, Safehouse wraps their sessions instead.
+With automatic Safehouse on, creation selects the first route that applies:
+
+1. **Derived route.** A provider with a derivable base uses `safehouse-<id>`, as described above. Codex always takes this route, even when its host can wrap it.
+2. **Wrap route.** The provider cannot be derived, and its `paseo.providers.snapshot()` entry has `launchWrap: true`.
+3. **Refusal.** Otherwise creation fails with the refusal text above.
+
+Host support comes only from static data: the provider snapshot and the create request. A failed snapshot read counts as no support.
+**Refresh providers** applies the same rule: it lists a configured provider as unsupported only when creation would refuse it.
+Setup succeeds when the only providers on the host use the wrap route, and writes the wrap launcher.
+
+On the wrap route, creation keeps the provider ID and configuration.
+It validates the installation, policy and daemon access record, then adds the metadata marker `paseo-safehouse.route: "wrap"`.
+Only this route sets the marker. Every other create removes a marker that the caller supplied, so the marker cannot select the wrap.
+Where the host offers the plugin requirement, creation also returns `requirePlugin: true`. Paseo then refuses to open the agent while Safehouse is inactive.
+The plugin requirement is not final in Paseo. Safehouse treats a boolean `requirePlugin` in the `agent.create.before` request as support.
+`hostOffersPluginRequirement` in `server/service.ts` is the only check of this signal.
+A host without the signal rejects an unknown create key, so Safehouse then returns no `requirePlugin`.
+The creation open writes `agents/<hash>.route.json` once, by hard link, and never replaces it.
+Every later open of that agent reads the record, including resume and history opens. A record for another provider, or a corrupt record, fails the open.
+Metadata alone never wraps an agent. An agent without the marker and without a record opens as before.
+A later open whose metadata has the marker but whose record is missing fails: "Safehouse route record is missing; recreate the agent or repair Safehouse state."
+
+The open prepares the snapshot and receipt as the derived route does, and returns `wrap: ["/bin/sh", <launcher>, <names>, <profile>, <features>]`.
+Paseo then starts `[...wrap, command, ...args]`.
+Setup writes the generic launcher `launchers/wrap-<hash>.sh` on every **Refresh providers**. An installation without it asks for **Refresh providers**.
+The launcher requires a prepared snapshot and checks its arguments:
+- environment names contain only `[A-Za-z0-9_,]`;
+- the provider profile is in the Safehouse state;
+- the features are empty or a set from `wrapGrants`.
+
+It resolves the harness like a direct exec: a path as given, otherwise the first `PATH` match.
+It denies writes to the command under its canonical folder, which keeps a link protected, and to the real path the command resolves to.
+Seatbelt matches canonical paths, so `//`, `.`, `..` and symlinked folders in `PATH` or the command do not weaken the rule. A path with a quote, backslash or control character, including a trailing newline, is refused.
+It then runs `safehouse --env-pass=<names> [--enable=<features>] --trust-workdir-config [--append-profile <provider>] --append-profile <exec> --append-profile <guard> -- <harness> <args…>`.
+The guard is last. A failed check exits with code 78 before Safehouse starts.
+
+`wrapGrants` in `server/providers.ts` lists what each wrapped provider needs for its own sign-in and configuration:
+
+| Provider | Read-write | Read-only | Safehouse features |
+| --- | --- | --- | --- |
+| Antigravity | `~/.gemini/antigravity-cli` | `~/.gemini/config` | `keychain`: `agy` loads its sign-in token from the macOS keychain, and Safehouse has no `agy` profile. |
+
+Setup renders each entry into `provider-<id>-<hash>.sb`, with metadata reads on each ancestor folder. Other wrapped providers get only the workspace policy.
+The panel lists agents with a route record together with `safehouse-*` agents, and **Reload** accepts them.
+
+The wrap route has these limits:
+- **Keep daemon access Off.** Paseo's host terminal tools, such as `create_terminal`, run outside any wrap.
+- **Work before the open hook is not wrapped.** This includes draft command and control discovery, and the catalog lookup during creation without a model. For Antigravity, the ACP initialize probe during creation runs unwrapped.
+- **Host operations are not wrapped.** These include usage queries, version checks and availability probes.
+- **Existing agents are never wrapped retroactively.** They have no route record and no plugin requirement.
+- **On a host without the plugin requirement, plugin loss removes the sandbox.** If the Safehouse plugin is disabled, removed or crashes, the next open of a wrapped agent starts its harness unsandboxed, and Paseo shows no error. On a host with the requirement, Paseo refuses that open instead.
+- **A provider without a `wrapGrants` entry may fail to sign in.** This applies to Goose, Fx and Hoplite.
+- **There is no account-home passthrough** on the wrap route.
 
 ### Provider setup recovery
 
@@ -206,7 +267,8 @@ The beta targets Paseo 0.15.3 and Safehouse 0.12.0. Earlier evidence used Paseo 
 | Provider command array | Start the bootstrap, then Safehouse and the native harness                                |
 | Plugin panel and RPCs  | Review access, report readiness, and reload selected agents                               |
 
-The opening hook cannot change executable arguments. Provider configuration supplies that execution mechanism.
+On hosts without the launch wrapper, the opening hook cannot change executable arguments, and provider configuration supplies the execution mechanism.
+On hosts with it, the opening hook returns `wrap` for plugin-supplied providers. See [Plugin-supplied providers](#plugin-supplied-providers).
 Creation hooks exclude Paseo’s internal agents. The beta must attempt the selected harness inside Safehouse, including harnesses outside the initial three adapters.
 The local candidate wraps configured command arrays when the public adapter API preserves their semantics.
 Providers without a usable exposed command fail with an explicit recovery path.
@@ -365,7 +427,7 @@ These improvements are outside the first beta requirements.
 | Opportunity | Useful upstream API | Current approach or limitation |
 | --- | --- | --- |
 | Per-draft Safehouse choice and readiness | Creation-form contribution with persisted, namespaced draft values | Workspace header menu governs subsequent launches across clients. See [launch controls](launch-controls.md). |
-| Safe launch for additional provider adapters | Public provider launch wrapper with executable, arguments, environment, and discovery context | Generic wrapping needs a feasibility check. Never retry an unsupported sandboxed launch outside Safehouse. |
+| Safe launch for additional provider adapters | Session launch wrapper, with a plugin requirement | Used for plugin-supplied providers when the host reports the wrapper. Without the requirement, plugin loss reopens wrapped agents unsandboxed. Discovery and host operations stay unwrapped. |
 | Consistent discovery lifecycle | Catalog hook with explicit configuration and launch context | Protected bootstrap handles discovery separately from session opening. |
 | Final external-capability visibility | Final merged MCP/tool inventory and an optional veto | Disclose external authority; hook-local maps cannot establish global filtering. |
 | Permission changes during reopen | Supported mutation of effective provider options before resume | Persist compatible creation options and test native resume. |

@@ -67,6 +67,11 @@ The agent pill remains visible while the inline control is unavailable.
 Older hosts and unresolved session references retain the agent pill. Reload preserves the conversation and provider.
 The workspace toggle does not change existing agents. Explicit Safehouse providers always use the sandbox.
 
+Providers from Paseo plugins, such as Antigravity, run inside Safehouse only on a host with the launch wrapper.
+Otherwise Safehouse refuses them. Disable automatic Safehouse to run them unsandboxed.
+On a host without the plugin requirement, if the Safehouse plugin is disabled, removed or crashes, the next open of such an agent starts it unsandboxed, and Paseo shows no error.
+Keep daemon access Off for these agents. The [design](docs/design.md#plugin-supplied-providers) lists the limits of this route.
+
 ## Access limits
 
 Safehouse restricts the agent process and its child processes.

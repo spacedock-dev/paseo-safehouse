@@ -19,13 +19,51 @@ const accountEnvironment: Record<string, string[]> = {
 export const launchError = (id: string, reason: string) => Object.assign(new Error(
   `Safehouse provider ${id}: ${reason}. Repair the reported problem and retry. When a workspace header is available, Disable automatic Safehouse there permits a separate ordinary launch.`,
 ), { name: "SafehouseLaunchError" });
-export async function configuredProvider(id: string, providers: Providers) {
+export const unsupportedError = (id: string) => Object.assign(new Error(
+  `${id} is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed.`,
+), { name: "SafehouseLaunchError" });
+/** The base factory a safehouse-<id> entry can extend, or null when the public configuration cannot derive one. */
+export function derivedBase(id: string, providers: Providers) {
   const config = (providers[id] ?? {}) as ProviderConfig;
   const base = factories.includes(id) ? id : config.extends;
   if (!base || (!factories.includes(base) && base !== "acp") ||
       (base === "acp" && specialAcp.includes(id)) ||
-      (base !== id && base !== "acp" && providers[base]?.extends))
-    throw launchError(id, "the public configuration cannot preserve this adapter's identity");
+      (base !== id && base !== "acp" && providers[base]?.extends)) return null;
+  return base;
+}
+/**
+ * What a provider on the launch-wrap route needs for its own sign-in and configuration.
+ * Folders are relative to the user home. `enable` lists Safehouse optional features.
+ * A provider without an entry gets only the workspace policy.
+ */
+export const wrapGrants: Record<string, { readWrite?: string[]; readOnly?: string[]; enable?: string[] }> = {
+  // agy keeps state, logs and conversations in ANTIGRAVITY_HOME (default ~/.gemini/antigravity-cli),
+  // reads config.json and mcp_config.json from ~/.gemini/config, and loads its sign-in token from the
+  // macOS keychain. Safehouse has no agy profile, so the keychain integration is enabled here.
+  antigravity: { readWrite: [".gemini/antigravity-cli"], readOnly: [".gemini/config"], enable: ["keychain"] },
+};
+/**
+ * Host support for the launch-wrap hook, read from the static provider snapshot entry.
+ * A host without the hook has no `launchWrap` field or no snapshot call. A failed read counts as no support.
+ */
+export async function launchWrapProviders(paseo: Paseo, cwd?: string) {
+  const providers = paseo.providers as unknown as {
+    snapshot?: (options?: { cwd?: string }) => Promise<{ entries?: { provider?: unknown; launchWrap?: unknown }[] }>;
+  } | undefined;
+  if (typeof providers?.snapshot !== "function") return new Set<string>();
+  try {
+    const { entries } = await providers.snapshot(cwd ? { cwd } : undefined);
+    return new Set(Array.isArray(entries) ? entries.flatMap((entry) =>
+      typeof entry?.provider === "string" && entry.launchWrap === true ? [entry.provider] : []) : []);
+  } catch { return new Set<string>(); }
+}
+export async function launchWrapSupported(paseo: Paseo, id: string, cwd: string) {
+  return (await launchWrapProviders(paseo, cwd)).has(id);
+}
+export async function configuredProvider(id: string, providers: Providers) {
+  const config = (providers[id] ?? {}) as ProviderConfig;
+  const base = derivedBase(id, providers);
+  if (!base) throw unsupportedError(id);
   const command = config.command ?? (base !== id ? providers[base]?.command : undefined) ??
     (["pi", "claude", "codex"].includes(base) ? [base] : undefined);
   if (!Array.isArray(command) || !command.length || command.some((arg) => typeof arg !== "string" || arg.includes("\0")) || !command[0])

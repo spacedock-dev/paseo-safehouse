@@ -11,9 +11,11 @@ import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import type { z } from "zod";
 import type { availabilitySchema } from "../shared/contracts";
-import { renderBootstrap } from "./launch";
+import { grantProfile, renderBootstrap, renderWrapLauncher } from "./launch";
 import { finishPending, pluginOwned, sameEntry, savePending, sameSource, serializeSetup, userOwned, validateInstallation } from "./setup";
-import { configuredProvider, launchError, type ProviderConfig } from "./providers";
+import {
+  configuredProvider, derivedBase, launchError, launchWrapProviders, launchWrapSupported, unsupportedError, wrapGrants, type ProviderConfig,
+} from "./providers";
 import {
   atomicJson,
   atomicWrite,
@@ -27,6 +29,7 @@ import {
   policyEnvironment,
   policyRevision,
   prepareSnapshot,
+  providerEnvironmentNames,
   readJson,
   readSource,
   loadPolicy,
@@ -66,6 +69,10 @@ export type Installation = {
   guard: string;
   catalogGuard?: string;
   piCatalogExtensions?: string[];
+  /** The generic session launcher for providers on the launch-wrap route. */
+  wrapLauncher?: string;
+  /** Grant profiles for providers on the launch-wrap route, by provider ID. */
+  wrapProfiles?: Record<string, string>;
 };
 type Receipt = {
   agentId: string;
@@ -103,6 +110,34 @@ async function agentAccess(request: PluginSessionOpenRequest & { metadata?: Reco
   await atomicWrite(temp, JSON.stringify({ agentId: request.agentId, access }));
   try { await fs.link(temp, file); } finally { await fs.rm(temp, { force: true }); }
   return access as PaseoAccess;
+}
+
+// The launch-wrap route is chosen once, at create, and recorded for every later open of that agent.
+const routeMetadataKey = "paseo-safehouse.route";
+const routePath = (id: string) => path.join(stateRoot(), "agents", `${hash(id)}.route.json`);
+async function wrapRoute(agentId: string) {
+  const record = await readJson<{ agentId?: unknown; provider?: unknown; route?: unknown }>(routePath(agentId))
+    .catch(() => ({ agentId: null }));
+  if (record && (record.agentId !== agentId || record.route !== "wrap" || typeof record.provider !== "string"))
+    throw new Error("Safehouse route record is unreadable or invalid. Repair the protected record before launch.");
+  return record ? record.provider as string : null;
+}
+// Only the creation open with the route marker writes the record. It is written once and never replaced.
+// On a later open the marker without a record refuses the open; it never selects the wrap.
+async function recordWrapRoute(request: PluginSessionOpenRequest & { metadata?: Record<string, unknown> }) {
+  const stored = await wrapRoute(request.agentId);
+  if (stored !== null) {
+    if (stored !== request.provider)
+      throw new Error("Safehouse route record names another provider. Repair the protected record before launch.");
+    return true;
+  }
+  if (request.metadata?.[routeMetadataKey] !== "wrap") return false;
+  if (request.reason !== "create")
+    throw new Error("Safehouse route record is missing; recreate the agent or repair Safehouse state.");
+  const file = routePath(request.agentId), temp = `${file}.${randomUUID()}.tmp`;
+  await atomicWrite(temp, JSON.stringify({ agentId: request.agentId, provider: request.provider, route: "wrap" }));
+  try { await fs.link(temp, file); } finally { await fs.rm(temp, { force: true }); }
+  return true;
 }
 
 const routingPath = (cwd: string) => path.join(stateRoot(), "workspaces", `${hash(cwd)}.json`);
@@ -296,6 +331,9 @@ async function setupLocked(
   }
 
   const current = (await paseo.config.get()).config.providers ?? {};
+  // Providers that creation sends to the launch-wrap route, by the same rule as routeCreation.
+  const wrapProviders = await launchWrapProviders(paseo);
+  const wrappable = (id: string) => wrapProviders.has(id) && !derivedBase(id, current);
   const entries: Record<string, Variant> = { ...old?.entries };
   const sources: Record<string, Source> = { ...old?.sources };
   const unavailable: Record<string, string> = {};
@@ -312,7 +350,10 @@ async function setupLocked(
     if (old?.entries[host] || host.startsWith("safehouse-") || /-safehouse(?:-direct)?$/.test(host)) continue;
     let resolved;
     try { resolved = await configuredProvider(host, current); }
-    catch (e) { unavailable[host] = e instanceof Error ? e.message : String(e); continue; }
+    catch (e) {
+      if (!wrappable(host)) unavailable[host] = e instanceof Error ? e.message : String(e);
+      continue;
+    }
     const { base, config, command, envPass, accountEnv } = resolved;
     const executable = command[0];
     const id = variant(host);
@@ -333,7 +374,7 @@ async function setupLocked(
       sources[id] = { ...source, source: current[source.provider] ?? null, baseSource: current[source.base] ?? null };
     }
   }
-  if (!old && !wrappers.length && !Object.keys(entries).length)
+  if (!old && !wrappers.length && !Object.keys(entries).length && ![...wrapProviders].some(wrappable))
     throw new Error(
       "No configured harness can be wrapped. Check command arrays and executable availability.",
     );
@@ -342,6 +383,17 @@ async function setupLocked(
   const guard = path.join(root, `guard-${hash(guardText).slice(0, 16)}.sb`);
   const catalogText = guardText + guardProfile(endpoints.homes, [], endpoints.ports);
   const catalogGuard = path.join(root, `catalog-${hash(catalogText).slice(0, 16)}.sb`);
+  const wrapText = renderWrapLauncher({ root, binary, guard,
+    features: [...new Set(Object.values(wrapGrants).flatMap(({ enable }) => enable?.length ? [enable.join(",")] : []))] });
+  const wrapLauncher = path.join(root, "launchers", `wrap-${hash(wrapText).slice(0, 16)}.sh`);
+  bootstraps.push({ file: wrapLauncher, text: wrapText });
+  const wrapProfiles: Record<string, string> = {};
+  const userHome = await canonicalDirectory(homedir());
+  for (const [id, grants] of Object.entries(wrapGrants)) {
+    const text = grantProfile(userHome, grants);
+    wrapProfiles[id] = path.join(root, `provider-${hash(id).slice(0, 8)}-${hash(text).slice(0, 16)}.sb`);
+    bootstraps.push({ file: wrapProfiles[id], text });
+  }
   for (const { host, base, config, command, envPass, accountEnv } of wrappers) {
     const text = renderBootstrap({ root, binary, guard, catalogGuard, command, host: base, piCatalogExtensions, envPass, accountEnv });
     const file = path.join(root, "launchers", `${hash(host).slice(0, 16)}-${hash(text).slice(0, 16)}.sh`);
@@ -361,7 +413,7 @@ async function setupLocked(
     if (!sameEntry(current[id], old?.entries[id]))
       throw new Error(`Provider ${id} belongs to another configuration. It was not changed.`);
   await savePending(root, {
-    installation: { binary, ...caps, ...details, entries, sources, unavailable, guard, catalogGuard, piCatalogExtensions },
+    installation: { binary, ...caps, ...details, entries, sources, unavailable, guard, catalogGuard, piCatalogExtensions, wrapLauncher, wrapProfiles },
     previous: Object.fromEntries(Object.keys(entries).map(id => [id, current[id] ?? null])),
     files: [{ file: guard, text: guardText }, { file: catalogGuard, text: catalogText }, ...bootstraps],
   });
@@ -440,15 +492,16 @@ export async function save(
   await savePolicy(cwd, policy, revision);
   return { digest: policy.digest };
 }
-export async function routeCreation(
-  request: PluginBeforeRequests["agent.create"] & { metadata?: Record<string, unknown> },
-  paseo: Paseo,
-) {
+type CreateRequest = PluginBeforeRequests["agent.create"] & { metadata?: Record<string, unknown>; requirePlugin?: unknown };
+export async function routeCreation(request: CreateRequest, paseo: Paseo) {
   const cwd = await canonicalDirectory(request.config.cwd);
   const installed = await installation();
   const selected = installed?.entries[request.config.provider];
   const choice = launchChoice(request.metadata) ?? await routingChoice(cwd);
-  if (!selected && choice === false) return request;
+  // Only wrapCreation sets the route marker. Every other route drops a marker the caller supplied.
+  const { [routeMetadataKey]: marker, ...metadata } = request.metadata ?? {};
+  const unmarked = marker === undefined ? request : { ...request, metadata };
+  if (!selected && choice === false) return unmarked;
   const recover = <T>(operation: Promise<T>) => operation.catch((error: unknown) => {
     if (error instanceof Error && error.name === "SafehouseLaunchError") throw error;
     throw launchError(request.config.provider, error instanceof Error ? error.message : String(error));
@@ -457,7 +510,13 @@ export async function routeCreation(
   const provider = selected ? request.config.provider : variant(request.config.provider);
   const host = installed?.sources?.[provider]?.base ?? (selected ? native(provider) : request.config.provider);
   if (!installed?.entries[provider] || !host) {
-    await recover(configuredProvider(request.config.provider, (await paseo.config.get()).config.providers ?? {}));
+    const providers = (await paseo.config.get()).config.providers ?? {};
+    // A provider that cannot be derived uses the launch wrap where its host reports support.
+    if (!selected && !derivedBase(request.config.provider, providers)) {
+      if (!(await launchWrapSupported(paseo, request.config.provider, cwd))) throw unsupportedError(request.config.provider);
+      return wrapCreation(request, paseo, cwd, recover);
+    }
+    await recover(configuredProvider(request.config.provider, providers));
     throw launchError(request.config.provider, "Refresh providers in the Safehouse panel to wrap this provider");
   }
   const saved = await recover(ready(paseo, provider));
@@ -475,7 +534,7 @@ export async function routeCreation(
       );
   }
   return {
-    ...request,
+    ...unmarked,
     config: {
       ...request.config,
       provider,
@@ -494,12 +553,51 @@ export async function routeCreation(
     },
   };
 }
+/**
+ * Host support for the plugin requirement. Keep this the only place that reads the signal.
+ *
+ * ASSUMPTION: the Paseo task plugin-required-active is not final. It plans `requirePlugin: true` in the
+ * agent.create.before result, and a strict create schema without it fails creation on that key. This
+ * plugin assumes that a supporting host includes `requirePlugin` as a boolean in every create request.
+ * If Paseo chooses another signal, change only this function. With no signal, it returns false and the
+ * create result never carries `requirePlugin`.
+ */
+function hostOffersPluginRequirement(request: CreateRequest) {
+  return typeof request.requirePlugin === "boolean";
+}
+async function wrapCreation(request: CreateRequest, paseo: Paseo, cwd: string, recover: <T>(operation: Promise<T>) => Promise<T>) {
+  const saved = await recover(ready(paseo));
+  if (!saved.wrapLauncher) throw launchError(request.config.provider, "Refresh providers in the Safehouse panel to wrap this provider");
+  await recover(loadPolicy(cwd, saved.features));
+  await recover(daemonChoice(cwd));
+  return {
+    ...request,
+    metadata: { ...request.metadata, [routeMetadataKey]: "wrap" },
+    // Where offered, Paseo refuses every later open while Safehouse is inactive, so a lost plugin cannot
+    // reopen the agent unwrapped. Without it, that open starts the harness unsandboxed (CL's ruling, 2026-11-21).
+    ...(hostOffersPluginRequirement(request) ? { requirePlugin: true } : {}),
+  };
+}
+async function prepareWrappedOpening(request: PluginSessionOpenRequest, paseo: Paseo) {
+  const saved = await ready(paseo);
+  if (!saved.wrapLauncher) throw launchError(request.provider, "Refresh providers in the Safehouse panel to wrap this provider");
+  const env = await prepareSession(request, saved);
+  const names = [...new Set([...providerEnvironmentNames(Object.keys(request.env ?? {})), "PASEO_HOME"])].join(",");
+  const wrap = ["/bin/sh", saved.wrapLauncher, names, saved.wrapProfiles?.[request.provider] ?? "",
+    (wrapGrants[request.provider]?.enable ?? []).join(",")];
+  return { ...request, env, wrap };
+}
 export async function prepareOpening(
   request: PluginSessionOpenRequest,
   paseo: Paseo,
 ) {
-  if (!(await installation())?.entries[request.provider]) return request;
+  if (!(await installation())?.entries[request.provider])
+    return await recordWrapRoute(request) ? prepareWrappedOpening(request, paseo) : request;
   const saved = await ready(paseo, request.provider);
+  return { ...request, env: await prepareSession(request, saved) };
+}
+// Shared by both routes: policy, daemon access choice, per-agent access, snapshot and receipt.
+async function prepareSession(request: PluginSessionOpenRequest, saved: Installation) {
   const cwd = await canonicalDirectory(request.cwd);
   const access = await agentAccess(request);
   const enabled = (await daemonChoice(cwd)).enabled || access === "daemon";
@@ -518,7 +616,7 @@ export async function prepareOpening(
     daemonAccess: enabled,
     paseoAccess: access,
   } satisfies Receipt);
-  return { ...request, env: policyEnvironment(request.env, snapshot, saved.home) };
+  return policyEnvironment(request.env, snapshot, saved.home);
 }
 export async function status(paseo: Paseo, workspaceId: string) {
   const cwd = await workspaceCwd(paseo, workspaceId);
@@ -572,11 +670,16 @@ export async function status(paseo: Paseo, workspaceId: string) {
               ? "setup"
               : "ready";
   const { entries } = await paseo.agents.list();
+  // Agents on the launch-wrap route keep their own provider ID. A corrupt record still lists the agent.
+  const wrapped = new Set<string>();
+  for (const { agent } of entries)
+    if (agent.workspaceId === workspaceId && !saved?.entries[agent.provider] &&
+        await wrapRoute(agent.id).catch(() => agent.provider) === agent.provider) wrapped.add(agent.id);
   const agents = await Promise.all(
     entries
       .filter(
         ({ agent }) =>
-          agent.workspaceId === workspaceId && saved?.entries[agent.provider],
+          agent.workspaceId === workspaceId && (saved?.entries[agent.provider] || wrapped.has(agent.id)),
       )
       .map(async ({ agent }) => {
         // Status refresh reconciles UI locators; lifecycle hooks never await metadata writes.
@@ -633,9 +736,10 @@ export async function reload(
   const agent = paseo.agents.ref(agentId);
   await agent.refresh();
   const provider = agent.current()?.provider ?? "";
-  if (agent.workspaceId !== workspaceId || !(await installation())?.entries[provider])
+  const derived = !!(await installation())?.entries[provider];
+  if (agent.workspaceId !== workspaceId || !(derived || await wrapRoute(agentId) === provider))
     throw new Error("Select a Safehouse agent in this workspace.");
-  const saved = await ready(paseo, provider);
+  const saved = await ready(paseo, derived ? provider : undefined);
   const cwd = await workspaceCwd(paseo, workspaceId);
   await loadPolicy(cwd, saved.features);
   await daemonChoice(cwd);

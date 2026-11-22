@@ -649,12 +649,14 @@ test("setup wraps configured providers, preserves ordinary entries and rejects d
   const modelLess = await routeCreation({ config: { cwd: base, provider: "generic" } }, paseo);
   assert.equal(modelLess.config.provider, "safehouse-generic");
   assert.equal(modelLess.config.model, undefined);
-  assert.match((await status(paseo, "fixture")).unavailable.plugin, /identity/);
+  assert.equal((await status(paseo, "fixture")).unavailable.plugin, "plugin is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed.");
   const result = await routeCreation(request, paseo);
   assert.equal(result.config.provider, "safehouse-custom");
   assert.deepEqual(result.config.providerOptions, { own: true });
   assert.equal(result.config.modeId, "auto");
-  await assert.rejects(routeCreation({ config: { ...request.config, provider: "plugin" } }, paseo), /Disable automatic Safehouse/);
+  // A host without a provider snapshot reports no launch-wrap support, so only the refusal text changes.
+  for (const extra of [{}, { requirePlugin: false }])
+    await assert.rejects(routeCreation({ config: { ...request.config, provider: "plugin" }, ...extra } as any, paseo), /^SafehouseLaunchError: plugin is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed\.$/);
   providers.added = { extends: "acp", label: "Added", command: [process.execPath] };
   await assert.rejects(routeCreation({ config: { cwd: base, provider: "added" } }, paseo), /Refresh providers.*Disable automatic Safehouse/);
   await assert.rejects(routeCreation({ config: { cwd: base, provider: "opencode" } }, paseo), /explicit command array.*Disable automatic Safehouse/);

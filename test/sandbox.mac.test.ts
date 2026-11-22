@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import { once } from "node:events";
-import { renderBootstrap } from "../server/launch";
+import { grantProfile, renderBootstrap, renderWrapLauncher } from "../server/launch";
 import {
   findExecutable,
   guardProfile,
@@ -413,4 +413,95 @@ const s=net.connect(${port},'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{
       assert.match(failure.stderr, message, label);
     }
   });
+});
+
+test("a wrapped launch gets the workspace and its grants, and the daemon, state and harness stay protected", { skip: process.platform !== "darwin" }, async (t) => {
+  const binary = await findExecutable("safehouse");
+  assert.ok(binary, "Safehouse must be installed");
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-wrap-")));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const home = path.join(base, "daemon"), root = path.join(home, "safehouse"), ws = path.join(base, "workspace");
+  const [granted, readable, other] = ["granted/state", "granted/config", "other"].map((name) => path.join(base, name));
+  for (const dir of [ws, granted, readable, other, path.join(root, "snapshots")]) await fs.mkdir(dir, { recursive: true });
+  for (const dir of [readable, other]) await fs.writeFile(path.join(dir, "canary"), "fixture");
+  await fs.writeFile(path.join(root, "installation.json"), "{}");
+  await fs.writeFile(path.join(home, "config.json"), "{}");
+  const listener = http.createServer((_req, res) => res.end("daemon"));
+  listener.listen(0, "127.0.0.1"); await once(listener, "listening");
+  t.after(() => listener.close());
+  const port = (listener.address() as { port: number }).port;
+  const guard = path.join(root, "guard.sb"), profile = path.join(root, "provider.sb"), launcher = path.join(root, "wrap.sh");
+  await fs.writeFile(guard, guardProfile([root], [], []));
+  await fs.writeFile(profile, grantProfile(base, { readWrite: ["granted/state"], readOnly: ["granted/config"] }));
+  await fs.writeFile(launcher, renderWrapLauncher({ root, binary, guard, features: ["keychain"] }));
+  // The harness lies in the writable workspace, so only the launcher's executable rule protects it.
+  const harness = path.join(ws, "harness");
+  await fs.writeFile(harness, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+  const snapshot = await prepareSnapshot(root, await resolvePolicy("", ws, []), guardProfile([home], [], [port]));
+  const q = JSON.stringify;
+  const probe = `const fs=require('node:fs'),net=require('node:net');const r={};
+const a=(k,f)=>{try{r[k]=f()??'allowed'}catch(e){r[k]=e.code}};
+a('workspace',()=>fs.writeFileSync(${q(path.join(ws, "written"))},'ok'));a('granted',()=>fs.writeFileSync(${q(path.join(granted, "written"))},'ok'));
+a('readable',()=>fs.readFileSync(${q(path.join(readable, "canary"))},'utf8'));a('readableWrite',()=>fs.writeFileSync(${q(path.join(readable, "canary"))},'bad'));
+a('other',()=>fs.readFileSync(${q(path.join(other, "canary"))},'utf8'));a('harness',()=>fs.writeFileSync(${q(harness)},'bad'));
+a('plugin',()=>fs.readFileSync(${q(path.join(root, "installation.json"))},'utf8'));a('config',()=>fs.readFileSync(${q(path.join(home, "config.json"))},'utf8'));
+const s=net.connect(${port},'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{r.port='allowed';s.destroy()});s.on('error',e=>r.port=e.code);s.on('timeout',()=>{r.port='timeout';s.destroy()});s.on('close',()=>console.log(JSON.stringify(r)));`;
+  const result = JSON.parse((await run("/bin/sh", [launcher, "PASEO_HOME", profile, "keychain", harness, "-e", probe], {
+    cwd: ws, env: policyEnvironment(process.env, snapshot), timeout: 45000,
+  })).stdout);
+  t.diagnostic(q(result));
+  assert.deepEqual(result, { workspace: "allowed", granted: "allowed", readable: "fixture", readableWrite: "EPERM",
+    other: "EPERM", harness: "EPERM", plugin: "EPERM", config: "EPERM", port: "EPERM" });
+  assert.match(await fs.readFile(harness, "utf8"), /^#!\/bin\/sh/);
+});
+
+test("a wrapped launch denies writes to the harness link and its target by canonical path, however the command names them", { skip: process.platform !== "darwin" }, async (t) => {
+  const binary = await findExecutable("safehouse");
+  assert.ok(binary, "Safehouse must be installed");
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-wrap-canonical-")));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const home = path.join(base, "daemon"), root = path.join(home, "safehouse"), ws = path.join(base, "workspace");
+  const bin = path.join(ws, "bin"), lib = path.join(ws, "lib"), alias = path.join(ws, "alias");
+  for (const dir of [bin, lib, path.join(root, "snapshots")]) await fs.mkdir(dir, { recursive: true });
+  // Everything lies in the writable workspace, so only the launcher's executable rule protects the harness.
+  await fs.symlink(bin, alias);
+  const target = path.join(lib, "harness-real"), link = path.join(bin, "harness"), script = `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`;
+  await fs.writeFile(target, script, { mode: 0o755 });
+  const guard = path.join(root, "guard.sb"), launcher = path.join(root, "wrap.sh");
+  await fs.writeFile(guard, guardProfile([root], [], []));
+  await fs.writeFile(launcher, renderWrapLauncher({ root, binary, guard, features: [] }));
+  const snapshot = await prepareSnapshot(root, await resolvePolicy("", ws, []), guardProfile([home], [], []));
+  const q = JSON.stringify, spare = path.join(ws, "spare");
+  const probe = `const fs=require('node:fs');const r={};const a=(k,f)=>{try{f();r[k]='allowed'}catch(e){r[k]=e.code}};
+a('target',()=>fs.appendFileSync(${q(target)},'#'));
+fs.writeFileSync(${q(spare)},'x');a('replaceLink',()=>fs.renameSync(${q(spare)},${q(link)}));
+a('removeLink',()=>fs.unlinkSync(${q(link)}));console.log(JSON.stringify(r));`;
+  const launchWith = (command: string, PATH: string) => run("/bin/sh", [launcher, "PASEO_HOME", "", "", command, "-e", probe], {
+    cwd: ws, env: policyEnvironment({ ...process.env, PATH }, snapshot), timeout: 45000,
+  });
+  const results: Record<string, unknown> = {};
+  for (const [label, command, PATH] of [
+    ["a canonical PATH folder", "harness", `${bin}:/usr/bin:/bin`],
+    ["a trailing slash in a PATH folder", "harness", `${bin}/:/usr/bin:/bin`],
+    ["a doubled slash in a PATH folder", "harness", `${ws}//bin:/usr/bin:/bin`],
+    ["a symlinked PATH folder", "harness", `${alias}:/usr/bin:/bin`],
+    ["dot segments in the command", `${bin}/../bin/./harness`, "/usr/bin:/bin"],
+    ["a symlinked folder in the command", `${alias}/harness`, "/usr/bin:/bin"],
+  ] as const) {
+    await fs.rm(link, { force: true });
+    await fs.symlink(target, link);
+    await fs.writeFile(target, script, { mode: 0o755 });
+    const result = JSON.parse((await launchWith(command, PATH)).stdout);
+    t.diagnostic(`${label}: ${q(result)}`);
+    results[label] = { ...result, intact: await fs.readlink(link).catch(() => null) === target && await fs.readFile(target, "utf8") === script };
+  }
+  assert.deepEqual(results, Object.fromEntries(Object.keys(results).map((label) =>
+    [label, { target: "EPERM", replaceLink: "EPERM", removeLink: "EPERM", intact: true }])));
+  // Command substitution drops trailing newlines. A target whose name ends in one is refused, not denied by a shortened rule.
+  const newline = path.join(lib, "harness-nl\n");
+  await fs.writeFile(newline, script, { mode: 0o755 });
+  await fs.symlink(newline, path.join(bin, "nl-harness"));
+  const failure = await launchWith("nl-harness", `${bin}:/usr/bin:/bin`).then(() => null, (e) => e);
+  assert.deepEqual([failure?.code, failure?.stdout], [78, ""]);
+  assert.match(failure.stderr, /control character/);
 });
