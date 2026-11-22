@@ -88,9 +88,9 @@ test("a host without launchWrap keeps the refusal and today's derived routes", {
   }
 });
 
-test("create selects the wrap route only with launchWrap and a host plugin requirement", { skip: process.platform !== "darwin" }, async (t) => {
+test("create selects the wrap route with launchWrap, and adds the plugin requirement only where the host offers it", { skip: process.platform !== "darwin" }, async (t) => {
   const { base, paseo } = await fixture(t, supporting);
-  // ASSUMPTION (Paseo plugin-required-active): a supporting host shows requirePlugin: false in the create request.
+  // A host with the plugin requirement shows requirePlugin as a boolean in the create request.
   const input = { config: { cwd: base, provider: "antigravity", model: "small" }, metadata: { kept: 1 }, requirePlugin: false };
   const before = structuredClone(input);
   const routed = await routeCreation(input, paseo) as any;
@@ -98,11 +98,16 @@ test("create selects the wrap route only with launchWrap and a host plugin requi
   assert.deepEqual(routed.config, input.config);
   assert.deepEqual(routed.metadata, { kept: 1, [routeKey]: "wrap" });
   assert.equal(routed.requirePlugin, true);
-  // launchWrap without the requirement signal (the launch-wrap host before plugin-required-active): refused.
-  await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" } }, paseo), unsupported("antigravity"));
-  // A state file cannot stand in for the host signal.
-  await fs.writeFile(path.join(base, "safehouse", "spike-assume-requirement"), "");
-  await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" } }, paseo), unsupported("antigravity"));
+  // launchWrap without the requirement signal (CL's ruling of 2026-11-21): wrapped, with no requirePlugin key,
+  // because the strict create schema of such a host rejects it.
+  const plain = { config: { cwd: base, provider: "antigravity", model: "small" }, metadata: { kept: 1 } };
+  const wrapped = await routeCreation(plain, paseo) as any;
+  assert.deepEqual(wrapped, { ...plain, metadata: { kept: 1, [routeKey]: "wrap" } });
+  assert.equal("requirePlugin" in wrapped, false);
+  // Model-less creation also takes the wrap route and adds only the marker.
+  const modelLess = await routeCreation({ config: { cwd: base, provider: "antigravity" } }, paseo) as any;
+  assert.deepEqual(Object.keys(modelLess).sort(), ["config", "metadata"]);
+  assert.equal(modelLess.metadata[routeKey], "wrap");
   // Codex can be derived, so it keeps safehouse-codex even when the host could wrap it.
   const codex = await routeCreation({ config: { cwd: base, provider: "codex", model: "small" }, requirePlugin: false } as any, paseo) as any;
   assert.equal(codex.config.provider, "safehouse-codex");
@@ -161,7 +166,8 @@ test("an installation from before the wrap route asks for Refresh providers", { 
   assert.ok(wrapLauncher);
   await atomicJson(file, older);
   const refresh = /Refresh providers in the Safehouse panel to wrap this provider/;
-  await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" }, requirePlugin: false } as any, paseo), refresh);
+  for (const extra of [{}, { requirePlugin: false }])
+    await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" }, ...extra } as any, paseo), refresh);
   await assert.rejects(prepareOpening(open("agent-1", "antigravity", "create", { [routeKey]: "wrap" }), paseo), refresh);
 });
 
