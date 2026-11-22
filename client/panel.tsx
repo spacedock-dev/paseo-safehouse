@@ -188,6 +188,9 @@ export function SafehousePanel({
         Safehouse limits the agent process and its children. Additional MCP
         services can provide access outside that sandbox.
       </Text>
+      <Text style={muted}>
+        Plugin providers such as Antigravity use Safehouse only when the host can wrap their sessions and require this plugin. Keep daemon access Off for them. Discovery and host checks run outside the sandbox.
+      </Text>
       {error || routingError ? (
         <Text
           accessibilityRole="alert"

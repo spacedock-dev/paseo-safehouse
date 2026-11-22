@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import { once } from "node:events";
-import { renderBootstrap } from "../server/launch";
+import { grantProfile, renderBootstrap, renderWrapLauncher } from "../server/launch";
 import {
   findExecutable,
   guardProfile,
@@ -413,4 +413,44 @@ const s=net.connect(${port},'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{
       assert.match(failure.stderr, message, label);
     }
   });
+});
+
+test("a wrapped launch gets the workspace and its grants, and the daemon, state and harness stay protected", { skip: process.platform !== "darwin" }, async (t) => {
+  const binary = await findExecutable("safehouse");
+  assert.ok(binary, "Safehouse must be installed");
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-wrap-")));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const home = path.join(base, "daemon"), root = path.join(home, "safehouse"), ws = path.join(base, "workspace");
+  const [granted, readable, other] = ["granted/state", "granted/config", "other"].map((name) => path.join(base, name));
+  for (const dir of [ws, granted, readable, other, path.join(root, "snapshots")]) await fs.mkdir(dir, { recursive: true });
+  for (const dir of [readable, other]) await fs.writeFile(path.join(dir, "canary"), "fixture");
+  await fs.writeFile(path.join(root, "installation.json"), "{}");
+  await fs.writeFile(path.join(home, "config.json"), "{}");
+  const listener = http.createServer((_req, res) => res.end("daemon"));
+  listener.listen(0, "127.0.0.1"); await once(listener, "listening");
+  t.after(() => listener.close());
+  const port = (listener.address() as { port: number }).port;
+  const guard = path.join(root, "guard.sb"), profile = path.join(root, "provider.sb"), launcher = path.join(root, "wrap.sh");
+  await fs.writeFile(guard, guardProfile([root], [], []));
+  await fs.writeFile(profile, grantProfile(base, { readWrite: ["granted/state"], readOnly: ["granted/config"] }));
+  await fs.writeFile(launcher, renderWrapLauncher({ root, binary, guard, features: ["keychain"] }));
+  // The harness lies in the writable workspace, so only the launcher's executable rule protects it.
+  const harness = path.join(ws, "harness");
+  await fs.writeFile(harness, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o755 });
+  const snapshot = await prepareSnapshot(root, await resolvePolicy("", ws, []), guardProfile([home], [], [port]));
+  const q = JSON.stringify;
+  const probe = `const fs=require('node:fs'),net=require('node:net');const r={};
+const a=(k,f)=>{try{r[k]=f()??'allowed'}catch(e){r[k]=e.code}};
+a('workspace',()=>fs.writeFileSync(${q(path.join(ws, "written"))},'ok'));a('granted',()=>fs.writeFileSync(${q(path.join(granted, "written"))},'ok'));
+a('readable',()=>fs.readFileSync(${q(path.join(readable, "canary"))},'utf8'));a('readableWrite',()=>fs.writeFileSync(${q(path.join(readable, "canary"))},'bad'));
+a('other',()=>fs.readFileSync(${q(path.join(other, "canary"))},'utf8'));a('harness',()=>fs.writeFileSync(${q(harness)},'bad'));
+a('plugin',()=>fs.readFileSync(${q(path.join(root, "installation.json"))},'utf8'));a('config',()=>fs.readFileSync(${q(path.join(home, "config.json"))},'utf8'));
+const s=net.connect(${port},'127.0.0.1');s.setTimeout(2000);s.on('connect',()=>{r.port='allowed';s.destroy()});s.on('error',e=>r.port=e.code);s.on('timeout',()=>{r.port='timeout';s.destroy()});s.on('close',()=>console.log(JSON.stringify(r)));`;
+  const result = JSON.parse((await run("/bin/sh", [launcher, "PASEO_HOME", profile, "keychain", harness, "-e", probe], {
+    cwd: ws, env: policyEnvironment(process.env, snapshot), timeout: 45000,
+  })).stdout);
+  t.diagnostic(q(result));
+  assert.deepEqual(result, { workspace: "allowed", granted: "allowed", readable: "fixture", readableWrite: "EPERM",
+    other: "EPERM", harness: "EPERM", plugin: "EPERM", config: "EPERM", port: "EPERM" });
+  assert.match(await fs.readFile(harness, "utf8"), /^#!\/bin\/sh/);
 });

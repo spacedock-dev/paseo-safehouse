@@ -95,3 +95,75 @@ echo 'A prepared Safehouse snapshot is required for this launch.' >&2
 exit 78
 `;
 }
+
+/**
+ * The session launcher for the launch-wrap route. Paseo runs
+ * `[/bin/sh, file, names, profile, features, command, ...args]`, where the first three values come from the open hook.
+ * Only a prepared snapshot runs. `features` must be one of the given sets, or empty.
+ */
+export function renderWrapLauncher(input: { root: string; binary: string; guard: string; features: string[] }) {
+  const { root, binary, guard } = input;
+  if (input.features.some((set) => !/^[a-z0-9-]+(,[a-z0-9-]+)*$/.test(set)))
+    throw new Error("Safehouse wrap features must be comma-separated feature names.");
+  const snapshots = path.join(root, "snapshots");
+  return `#!/bin/sh
+set -eu
+fail() {
+  echo "Safehouse: $1" >&2
+  exit 78
+}
+[ "$(/usr/bin/uname -s)" = Darwin ] || fail 'requires macOS.'
+[ "$#" -ge 4 ] || fail 'the wrapped launch has no command.'
+names=$1 provider_profile=$2 features=$3
+shift 3
+case "$names" in ''|*[!A-Za-z0-9_,]*) fail 'invalid environment names.' ;; esac
+case "$provider_profile" in ''|${quote(root + "/")}*) ;; *) fail 'the provider profile is outside Safehouse state.' ;; esac
+case "$features" in ${["''", ...input.features.map(quote)].join("|")}) ;; *) fail 'unsupported Safehouse features for a wrapped launch.' ;; esac
+case "\${SAFEHOUSE_WORKDIR-}" in
+  ${quote(snapshots)}/*) snapshot_name=\${SAFEHOUSE_WORKDIR#${quote(snapshots + "/")}} ;;
+  *) fail 'a prepared Safehouse snapshot is required for this launch.' ;;
+esac
+case "$snapshot_name" in ''|.|..|*/*) fail 'a prepared Safehouse snapshot is required for this launch.' ;; esac
+[ -f "$SAFEHOUSE_WORKDIR/.safehouse" ] || fail 'a prepared Safehouse snapshot is required for this launch.'
+# Paseo chooses the harness executable. Deny writes to it, as setup does for derived providers.
+# Resolve it like the direct exec Paseo would make: a path as given, otherwise the first PATH match.
+executable=
+case "$1" in
+  */*) if [ -f "$1" ] && [ -x "$1" ]; then executable=$1; fi ;;
+  *)
+    rest="\${PATH-}:"
+    while [ -n "$rest" ]; do
+      dir=\${rest%%:*} rest=\${rest#*:}
+      if [ -f "\${dir:-.}/$1" ] && [ -x "\${dir:-.}/$1" ]; then executable="\${dir:-.}/$1"; break; fi
+    done
+    ;;
+esac
+[ -n "$executable" ] || fail "command $1 is unavailable."
+case "$executable" in /*) ;; *) fail "command $1 does not resolve to an absolute path." ;; esac
+real=$(/bin/realpath -- "$executable") || fail "command $1 cannot be resolved."
+case "$executable$real" in *\\"*|*\\\\*|*[[:cntrl:]]*) fail 'the command path contains a quote, backslash or control character.' ;; esac
+exec_profile="$SAFEHOUSE_WORKDIR/exec-$$.sb"
+printf '(deny file-write* (literal "%s") (literal "%s"))\\n' "$executable" "$real" > "$exec_profile"
+shift
+# Build the options in front of the harness argv. The guard profile stays last.
+set -- --append-profile "$exec_profile" --append-profile ${quote(guard)} -- "$executable" "$@"
+if [ -n "$provider_profile" ]; then set -- --append-profile "$provider_profile" "$@"; fi
+set -- --trust-workdir-config "$@"
+if [ -n "$features" ]; then set -- --enable="$features" "$@"; fi
+exec ${quote(binary)} --env-pass="$names" "$@"
+`;
+}
+
+/** Access to folders below `home`, with metadata reads on their ancestors. */
+export function grantProfile(home: string, grants: { readWrite?: string[]; readOnly?: string[] }) {
+  const rules = new Set<string>();
+  for (const [access, folders] of [["file-read* file-write*", grants.readWrite ?? []], ["file-read*", grants.readOnly ?? []]] as const)
+    for (const relative of folders) {
+      const folder = path.resolve(home, relative);
+      if (!folder.startsWith(home + "/") || /["\\\x00-\x1f]/.test(folder)) throw new Error(`Invalid provider grant ${relative}.`);
+      rules.add(`(allow ${access} (subpath ${JSON.stringify(folder)}))`);
+      for (let dir = path.dirname(folder); dir.startsWith(home + "/"); dir = path.dirname(dir))
+        rules.add(`(allow file-read-metadata (literal ${JSON.stringify(dir)}))`);
+    }
+  return [...rules].map((rule) => rule + "\n").join("");
+}
