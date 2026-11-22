@@ -162,6 +162,7 @@ The small factory compatibility list reflects Paseo 0.15.3. The public API has n
 Plugin adapters, ambiguous inheritance, unavailable executables, and missing commands outside Pi/Claude/Codex defaults fail before execution.
 The installation records source and base configuration. Drift blocks launch with an instruction to configure Safehouse again.
 Setup retains owned variants for existing agents. Ownership comes from the protected installation record, not the provider suffix.
+Paseo’s provider settings own the `enabled` and `order` fields of an owned entry, so ownership and drift checks ignore them and Refresh providers keeps the user’s values.
 The variant’s default environment selects restricted catalog discovery.
 Prepared launches require an existing snapshot directly beneath the plugin’s snapshot directory.
 Missing or malformed environment values fail before the harness starts.
