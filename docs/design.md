@@ -219,6 +219,7 @@ The plugin copies the resolved effective policy into protected state outside the
 Each snapshot contains canonical grants and copies of custom profiles.
 `SAFEHOUSE_WORKDIR` selects the snapshot directory. An explicit grant supplies access to the actual workspace.
 The harness retains the actual workspace as its process directory.
+State paths use the canonical daemon home, so a symlinked `--home` launches.
 
 The plugin removes inherited policy overrides from session environment and applies its own values.
 Fixed final restrictions protect plugin state, snapshots, and plugin code.
