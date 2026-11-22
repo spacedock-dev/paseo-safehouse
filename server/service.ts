@@ -13,7 +13,7 @@ import type { availabilitySchema } from "../shared/contracts";
 import { grantProfile, renderBootstrap, renderWrapLauncher } from "./launch";
 import { finishPending, savePending, serializeSetup, validateInstallation } from "./setup";
 import {
-  configuredProvider, derivedBase, launchError, launchWrapSupported, unsupportedError, wrapGrants, type ProviderConfig,
+  configuredProvider, derivedBase, launchError, launchWrapProviders, launchWrapSupported, unsupportedError, wrapGrants, type ProviderConfig,
 } from "./providers";
 import {
   atomicJson,
@@ -118,6 +118,7 @@ async function wrapRoute(agentId: string) {
   return record ? record.provider as string : null;
 }
 // Only the creation open with the route marker writes the record. It is written once and never replaced.
+// On a later open the marker without a record refuses the open; it never selects the wrap.
 async function recordWrapRoute(request: PluginSessionOpenRequest & { metadata?: Record<string, unknown> }) {
   const stored = await wrapRoute(request.agentId);
   if (stored !== null) {
@@ -125,7 +126,9 @@ async function recordWrapRoute(request: PluginSessionOpenRequest & { metadata?: 
       throw new Error("Safehouse route record names another provider. Repair the protected record before launch.");
     return true;
   }
-  if (request.reason !== "create" || request.metadata?.[routeMetadataKey] !== "wrap") return false;
+  if (request.metadata?.[routeMetadataKey] !== "wrap") return false;
+  if (request.reason !== "create")
+    throw new Error("Safehouse route record is missing; recreate the agent or repair Safehouse state.");
   const file = routePath(request.agentId), temp = `${file}.${randomUUID()}.tmp`;
   await atomicWrite(temp, JSON.stringify({ agentId: request.agentId, provider: request.provider, route: "wrap" }));
   try { await fs.link(temp, file); } finally { await fs.rm(temp, { force: true }); }
@@ -323,6 +326,9 @@ async function setupLocked(
   }
 
   const current = (await paseo.config.get()).config.providers ?? {};
+  // Providers that creation sends to the launch-wrap route, by the same rule as routeCreation.
+  const wrapProviders = await launchWrapProviders(paseo);
+  const wrappable = (id: string) => wrapProviders.has(id) && !derivedBase(id, current);
   const entries: Record<string, Variant> = { ...old?.entries };
   const sources: Record<string, Source> = { ...old?.sources };
   const unavailable: Record<string, string> = {};
@@ -339,7 +345,10 @@ async function setupLocked(
     if (old?.entries[host] || host.startsWith("safehouse-") || /-safehouse(?:-direct)?$/.test(host)) continue;
     let resolved;
     try { resolved = await configuredProvider(host, current); }
-    catch (e) { unavailable[host] = e instanceof Error ? e.message : String(e); continue; }
+    catch (e) {
+      if (!wrappable(host)) unavailable[host] = e instanceof Error ? e.message : String(e);
+      continue;
+    }
     const { base, config, command, envPass, accountEnv } = resolved;
     const executable = command[0];
     const id = variant(host);
@@ -360,7 +369,7 @@ async function setupLocked(
       sources[id] = { ...source, source: current[source.provider] ?? null, baseSource: current[source.base] ?? null };
     }
   }
-  if (!old && !wrappers.length && !Object.keys(entries).length)
+  if (!old && !wrappers.length && !Object.keys(entries).length && ![...wrapProviders].some(wrappable))
     throw new Error(
       "No configured harness can be wrapped. Check command arrays and executable availability.",
     );
@@ -481,7 +490,10 @@ export async function routeCreation(request: CreateRequest, paseo: Paseo) {
   const installed = await installation();
   const selected = installed?.entries[request.config.provider];
   const choice = launchChoice(request.metadata) ?? await routingChoice(cwd);
-  if (!selected && choice === false) return request;
+  // Only wrapCreation sets the route marker. Every other route drops a marker the caller supplied.
+  const { [routeMetadataKey]: marker, ...metadata } = request.metadata ?? {};
+  const unmarked = marker === undefined ? request : { ...request, metadata };
+  if (!selected && choice === false) return unmarked;
   const recover = <T>(operation: Promise<T>) => operation.catch((error: unknown) => {
     if (error instanceof Error && error.name === "SafehouseLaunchError") throw error;
     throw launchError(request.config.provider, error instanceof Error ? error.message : String(error));
@@ -514,7 +526,7 @@ export async function routeCreation(request: CreateRequest, paseo: Paseo) {
       );
   }
   return {
-    ...request,
+    ...unmarked,
     config: {
       ...request.config,
       provider,

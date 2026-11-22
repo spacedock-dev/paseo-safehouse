@@ -180,16 +180,20 @@ With automatic Safehouse on, creation selects the first route that applies:
 3. **Refusal.** Otherwise creation fails with the refusal text above.
 
 Host support comes only from static data: the provider snapshot and the create request. A failed snapshot read counts as no support.
+**Refresh providers** applies the same rule: it lists a configured provider as unsupported only when creation would refuse it.
+Setup succeeds when the only providers on the host use the wrap route, and writes the wrap launcher.
 
 On the wrap route, creation keeps the provider ID and configuration.
 It validates the installation, policy and daemon access record, then adds the metadata marker `paseo-safehouse.route: "wrap"`.
+Only this route sets the marker. Every other create removes a marker that the caller supplied, so the marker cannot select the wrap.
 Where the host offers the plugin requirement, creation also returns `requirePlugin: true`. Paseo then refuses to open the agent while Safehouse is inactive.
 The plugin requirement is not final in Paseo. Safehouse treats a boolean `requirePlugin` in the `agent.create.before` request as support.
 `hostOffersPluginRequirement` in `server/service.ts` is the only check of this signal.
 A host without the signal rejects an unknown create key, so Safehouse then returns no `requirePlugin`.
 The creation open writes `agents/<hash>.route.json` once, by hard link, and never replaces it.
 Every later open of that agent reads the record, including resume and history opens. A record for another provider, or a corrupt record, fails the open.
-Metadata alone never wraps an agent, so an agent without a record opens as before.
+Metadata alone never wraps an agent. An agent without the marker and without a record opens as before.
+A later open whose metadata has the marker but whose record is missing fails: "Safehouse route record is missing; recreate the agent or repair Safehouse state."
 
 The open prepares the snapshot and receipt as the derived route does, and returns `wrap: ["/bin/sh", <launcher>, <names>, <profile>, <features>]`.
 Paseo then starts `[...wrap, command, ...args]`.
@@ -200,7 +204,8 @@ The launcher requires a prepared snapshot and checks its arguments:
 - the features are empty or a set from `wrapGrants`.
 
 It resolves the harness like a direct exec: a path as given, otherwise the first `PATH` match.
-It denies writes to the resolved and the real executable path, as setup does for derived harnesses.
+It denies writes to the command under its canonical folder, which keeps a link protected, and to the real path the command resolves to.
+Seatbelt matches canonical paths, so `//`, `.`, `..` and symlinked folders in `PATH` or the command do not weaken the rule. A path with a quote, backslash or control character, including a trailing newline, is refused.
 It then runs `safehouse --env-pass=<names> [--enable=<features>] --trust-workdir-config [--append-profile <provider>] --append-profile <exec> --append-profile <guard> -- <harness> <args…>`.
 The guard is last. A failed check exits with code 78 before Safehouse starts.
 

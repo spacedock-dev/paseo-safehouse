@@ -46,15 +46,19 @@ export const wrapGrants: Record<string, { readWrite?: string[]; readOnly?: strin
  * Host support for the launch-wrap hook, read from the static provider snapshot entry.
  * A host without the hook has no `launchWrap` field or no snapshot call. A failed read counts as no support.
  */
-export async function launchWrapSupported(paseo: Paseo, id: string, cwd: string) {
+export async function launchWrapProviders(paseo: Paseo, cwd?: string) {
   const providers = paseo.providers as unknown as {
     snapshot?: (options?: { cwd?: string }) => Promise<{ entries?: { provider?: unknown; launchWrap?: unknown }[] }>;
-  };
-  if (typeof providers.snapshot !== "function") return false;
+  } | undefined;
+  if (typeof providers?.snapshot !== "function") return new Set<string>();
   try {
-    const { entries } = await providers.snapshot({ cwd });
-    return Array.isArray(entries) && entries.some((entry) => entry?.provider === id && entry.launchWrap === true);
-  } catch { return false; }
+    const { entries } = await providers.snapshot(cwd ? { cwd } : undefined);
+    return new Set(Array.isArray(entries) ? entries.flatMap((entry) =>
+      typeof entry?.provider === "string" && entry.launchWrap === true ? [entry.provider] : []) : []);
+  } catch { return new Set<string>(); }
+}
+export async function launchWrapSupported(paseo: Paseo, id: string, cwd: string) {
+  return (await launchWrapProviders(paseo, cwd)).has(id);
 }
 export async function configuredProvider(id: string, providers: Providers) {
   const config = (providers[id] ?? {}) as ProviderConfig;

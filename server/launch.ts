@@ -140,10 +140,16 @@ case "$1" in
 esac
 [ -n "$executable" ] || fail "command $1 is unavailable."
 case "$executable" in /*) ;; *) fail "command $1 does not resolve to an absolute path." ;; esac
-real=$(/bin/realpath -- "$executable") || fail "command $1 cannot be resolved."
-case "$executable$real" in *\\"*|*\\\\*|*[[:cntrl:]]*) fail 'the command path contains a quote, backslash or control character.' ;; esac
+# Seatbelt matches canonical paths. The rule names the command itself under its canonical folder, so a link
+# stays protected, and the target it resolves to. The final dot keeps trailing newlines that command substitution removes.
+folder=$(cd -P -- "\${executable%/*}/" && /bin/pwd -P && echo .) || fail "command $1 cannot be resolved."
+folder=\${folder%?.}
+link="\${folder%/}/\${executable##*/}"
+real=$(/bin/realpath -- "$executable" && echo .) || fail "command $1 cannot be resolved."
+real=\${real%?.}
+case "$link$real" in *\\"*|*\\\\*|*[[:cntrl:]]*) fail 'the command path contains a quote, backslash or control character.' ;; esac
 exec_profile="$SAFEHOUSE_WORKDIR/exec-$$.sb"
-printf '(deny file-write* (literal "%s") (literal "%s"))\\n' "$executable" "$real" > "$exec_profile"
+printf '(deny file-write* (literal "%s") (literal "%s"))\\n' "$link" "$real" > "$exec_profile"
 shift
 # Build the options in front of the harness argv. The guard profile stays last.
 set -- --append-profile "$exec_profile" --append-profile ${quote(guard)} -- "$executable" "$@"
