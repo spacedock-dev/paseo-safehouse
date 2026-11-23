@@ -103,7 +103,7 @@ test(
     assert.equal(session.cwd, await fs.realpath(root));
     assert.equal(session.workdir, snapshot);
     assert.deepEqual(session.args, [
-      "--env-pass=PASEO_HOME",
+      "--env-pass=PASEO_HOME,PASEO_AGENT_ID,PASEO_WORKSPACE_ID,PASEO_AGENT_CWD",
       "--trust-workdir-config",
       "--append-profile",
       guard,
@@ -286,7 +286,7 @@ test("prepared Claude and Codex launches pass their account names; catalog launc
   await fs.mkdir(snapshot, { recursive: true });
   await fs.writeFile(path.join(snapshot, ".safehouse"), "");
   const claude = ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"], codex = ["CODEX_HOME", "CODEX_SQLITE_HOME"];
-  const command = [process.execPath];
+  const command = [process.execPath], identity = ["PASEO_AGENT_ID", "PASEO_WORKSPACE_ID", "PASEO_AGENT_CWD"];
   for (const [id, providers, names] of [
     ["claude", { claude: { command } }, claude],
     ["codex", { codex: { command, env: { CODEX_HOME: "/configured" } } }, codex],
@@ -300,13 +300,16 @@ test("prepared Claude and Codex launches pass their account names; catalog launc
     const catalog = await launch(path.join(root, "catalog")), session = await launch(snapshot);
     const configuredNames = id === "codex" ? ["CODEX_HOME"] : [];
     assert.equal(catalog[0], `--env-pass=${[...configuredNames, "PASEO_HOME"].join(",")}`, `${id} catalog`);
-    assert.equal(session[0], `--env-pass=${[...new Set([...configuredNames, "PASEO_HOME", ...names])].join(",")}`, `${id} session`);
+    assert.equal(session[0], `--env-pass=${[...new Set([...configuredNames, "PASEO_HOME", ...identity, ...names])].join(",")}`, `${id} session`);
     const profiles = session.filter((arg, i) => session[i - 1] === "--append-profile");
     assert.deepEqual([profiles.length, profiles.at(-1)], [names.length ? 2 : 1, guard], `${id} profiles`);
     if (names.length) assert.match(profiles[0].slice(snapshot.length), /^\/account-\d+\.sb$/);
   }
-  // Reserved names stay filtered even when a caller supplies them as account names.
-  await fs.writeFile(script, renderBootstrap({ root, binary, guard, command, host: "claude", accountEnv: ["PASEO_HOME", "NODE_OPTIONS", "SAFEHOUSE_X", "CLAUDE_CONFIG_DIR"] }));
-  const filtered = JSON.parse((await run("/bin/sh", [script], { cwd: root, env: { PATH: process.env.PATH!, SAFEHOUSE_WORKDIR: snapshot } })).stdout);
-  assert.equal(filtered[0], "--env-pass=PASEO_HOME,CLAUDE_CONFIG_DIR");
+  // Reserved names stay filtered even when a caller supplies them as provider or account names.
+  // The identity names reach prepared sessions only as the plugin's constants, never through configuration.
+  const reserved = ["PASEO_HOME", "PASEO_AGENT_ID", "PASEO_HOST", "NODE_OPTIONS", "SAFEHOUSE_X"];
+  await fs.writeFile(script, renderBootstrap({ root, binary, guard, command, host: "claude", envPass: reserved, accountEnv: [...reserved, "CLAUDE_CONFIG_DIR"] }));
+  const filtered = (workdir: string) => run("/bin/sh", [script], { cwd: root, env: { PATH: process.env.PATH!, SAFEHOUSE_WORKDIR: workdir } }).then(({ stdout }) => JSON.parse(stdout));
+  assert.equal((await filtered(snapshot))[0], `--env-pass=PASEO_HOME,${identity.join(",")},CLAUDE_CONFIG_DIR`);
+  assert.equal((await filtered(path.join(root, "catalog")))[0], "--env-pass=PASEO_HOME");
 });

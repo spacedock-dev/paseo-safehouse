@@ -128,7 +128,7 @@ test("open returns the wrap for the recorded agent only, on every later open", {
   const created = open("agent-1", "antigravity", "create", { [routeKey]: "wrap" });
   const result = await prepareOpening(created, paseo) as any;
   // Antigravity gets its grant profile and Safehouse's keychain integration.
-  assert.deepEqual(result.wrap, ["/bin/sh", installation.wrapLauncher, "FIXTURE_TOKEN_NAME,PASEO_HOME", installation.wrapProfiles.antigravity, "keychain"]);
+  assert.deepEqual(result.wrap, ["/bin/sh", installation.wrapLauncher, "FIXTURE_TOKEN_NAME,PASEO_HOME,PASEO_AGENT_ID,PASEO_WORKSPACE_ID,PASEO_AGENT_CWD", installation.wrapProfiles.antigravity, "keychain"]);
   assert.match(result.env.SAFEHOUSE_WORKDIR, new RegExp(`^${base}/safehouse/snapshots/`));
   const home = await fs.realpath(os.homedir());
   const grants = await fs.readFile(installation.wrapProfiles.antigravity, "utf8");

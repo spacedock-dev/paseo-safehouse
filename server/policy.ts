@@ -63,6 +63,8 @@ export async function findExecutable(name: string) {
   }
   return null;
 }
+// Paseo sets these per-agent identifiers after the open hook returns. Only session launchers pass them.
+export const paseoIdentityNames = ["PASEO_AGENT_ID", "PASEO_WORKSPACE_ID", "PASEO_AGENT_CWD"];
 export const blockedEnvironmentName = (name: string) =>
   /^(SAFEHOUSE_|PASEO_|DYLD_|LD_|BASH_FUNC_)/.test(name) ||
   ["NODE_OPTIONS", "NODE_PATH", "ELECTRON_RUN_AS_NODE", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"].includes(name);

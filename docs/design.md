@@ -154,6 +154,8 @@ Setup collects valid environment names explicitly configured on the source and i
 Both bootstrap branches pass these names through Safehouse. The bootstrap contains names, not environment values.
 Policy, loader, Node and shell-control variables remain blocked.
 The plugin supplies the captured daemon home through `PASEO_HOME` and passes it explicitly through Safehouse. Other `PASEO_*` variables remain masked. Unlisted daemon variables retain Safehouse’s default sanitization.
+Session launches of both routes also pass `PASEO_AGENT_ID`, `PASEO_WORKSPACE_ID` and `PASEO_AGENT_CWD`. Paseo sets these identifiers for the agent after the open hook returns, and its values replace the plugin's empty masks. A name that Paseo omits keeps its empty mask, so a stale daemon value never reaches the session. Catalog discovery has no agent and passes only `PASEO_HOME`.
+Configuration cannot add any `PASEO_*` name. The identifiers grant no path, port or credential. Per-agent access uses Paseo's own `request.agentId` from the open hook, not these variables.
 Ordinary provider configuration remains intact. Installation rejects collisions with unrelated provider entries.
 Explicit command arrays support built-in factories and direct derivatives of those factories.
 A derived variant extends the same built-in and retains source overrides, including native environment and tool-restriction inheritance.
@@ -197,6 +199,7 @@ Metadata alone never wraps an agent. An agent without the marker and without a r
 A later open whose metadata has the marker but whose record is missing fails: "Safehouse route record is missing; recreate the agent or repair Safehouse state."
 
 The open prepares the snapshot and receipt as the derived route does, and returns `wrap: ["/bin/sh", <launcher>, <names>, <profile>, <features>]`.
+`<names>` lists the provider environment names, `PASEO_HOME` and the three Paseo identity names. The wrap route gets a changed list on the next open, without **Refresh providers**.
 Paseo then starts `[...wrap, command, ...args]`.
 Setup writes the generic launcher `launchers/wrap-<hash>.sh` on every **Refresh providers**. An installation without it asks for **Refresh providers**.
 The launcher requires a prepared snapshot and checks its arguments:
