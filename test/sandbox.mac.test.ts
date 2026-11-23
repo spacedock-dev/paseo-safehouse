@@ -15,7 +15,9 @@ import {
   loadPolicy,
   readSource,
   run,
+  atomicJson,
 } from "../server/policy";
+import { prepareOpening, setup } from "../server/service";
 
 test(
   "bootstrap enforces workspace snapshots and isolates catalog discovery",
@@ -504,4 +506,56 @@ a('removeLink',()=>fs.unlinkSync(${q(link)}));console.log(JSON.stringify(r));`;
   const failure = await launchWith("nl-harness", `${bin}:/usr/bin:/bin`).then(() => null, (e) => e);
   assert.deepEqual([failure?.code, failure?.stdout], [78, ""]);
   assert.match(failure.stderr, /control character/);
+});
+
+test("both launch routes pass Paseo's identity variables and keep every other Paseo and Safehouse name out", { skip: process.platform !== "darwin" }, async (t) => {
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-identity-")));
+  const saved = { PASEO_HOME: process.env.PASEO_HOME, PASEO_WORKSPACE_ID: process.env.PASEO_WORKSPACE_ID };
+  t.after(async () => {
+    for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    await fs.rm(base, { recursive: true, force: true });
+  });
+  process.env.PASEO_HOME = base;
+  await atomicJson(path.join(base, "config.json"), { daemon: { listen: "127.0.0.1:45679" }, plugins: { "paseo-safehouse": { path: base } } });
+  const providers: Record<string, any> = { claude: { command: [process.execPath] } };
+  const paseo = {
+    workspaces: { ref: () => ({ refresh: async () => ({ workspaceDirectory: base }) }) },
+    agents: { list: async () => ({ entries: [] }), ref: () => ({ refresh: async () => {}, current: () => undefined }) },
+    providers: { listModels: async () => ({ models: [{ id: "small", isDefault: true }] }),
+      snapshot: async () => ({ entries: [{ provider: "antigravity", status: "ready", launchWrap: true }] }) },
+    config: { get: async () => ({ config: { providers } }), patch: async (patch: any) => Object.assign(providers, patch.providers) },
+  } as unknown as Parameters<typeof setup>[0];
+  await setup(paseo);
+  await fs.writeFile(path.join(base, ".safehouse"), "");
+  // Names that must stay out. Values are fixtures, not credentials.
+  const decoys = { PASEO_HOST: "127.0.0.1:1", PASEO_URL: "http://127.0.0.1:1", PASEO_SOCKET: "/tmp/decoy.sock", PASEO_TOKEN: "decoy",
+    PASEO_MCP_AUTH_TOKEN: "decoy", SAFEHOUSE_DECOY: "decoy", DYLD_INSERT_LIBRARIES: "/tmp/decoy.dylib", NODE_OPTIONS: "--no-warnings" };
+  const identity = { PASEO_AGENT_ID: "11111111-2222-4333-8444-555555555555", PASEO_WORKSPACE_ID: "ws-identity-fixture", PASEO_AGENT_CWD: base };
+  const listed = [...Object.keys(identity), ...Object.keys(decoys), "PASEO_HOME"];
+  const probe = `const n=${JSON.stringify(listed)};const r={};for(const k of n) r[k]=k in process.env?process.env[k]:null;
+r.other=Object.keys(process.env).filter(k=>/^(PASEO_|SAFEHOUSE_)/.test(k)&&!n.includes(k));console.log(JSON.stringify(r));`;
+  // Paseo spawns with the daemon env, then the provider entry env, then the open result env, then its identity overlay.
+  const launch = async (provider: string, overlay: Record<string, string>, metadata?: Record<string, unknown>) => {
+    const request = { agentId: identity.PASEO_AGENT_ID, workspaceId: "fixture", provider, cwd: base, reason: "create", purpose: "interactive",
+      title: null, labels: {}, tools: [], env: { ...decoys }, mcpServers: {}, ...(metadata ? { metadata } : {}) } as any;
+    const result = await prepareOpening(request, paseo) as any;
+    // A derived entry runs its own launcher; a wrapped harness runs behind the wrap argv from the open result.
+    const argv = [...(result.wrap ? [...result.wrap, process.execPath] : providers[provider].command), "-e", probe];
+    const env = { ...process.env, ...decoys, ...providers[provider]?.env, ...result.env, ...overlay };
+    return JSON.parse((await run(argv[0], argv.slice(1), { cwd: base, env, timeout: 45000 })).stdout);
+  };
+  const absent = Object.fromEntries(Object.keys(decoys).map((name) => [name, null]));
+  const { PASEO_WORKSPACE_ID: _, ...withoutWorkspace } = identity;
+  const results: Record<string, unknown> = {}, expected: Record<string, unknown> = {};
+  for (const [route, provider, metadata] of [["derived", "safehouse-claude"], ["wrap", "antigravity", { "paseo-safehouse.route": "wrap" }]] as const) {
+    results[route] = await launch(provider, identity, metadata);
+    expected[route] = { ...identity, ...absent, PASEO_HOME: base, other: [] };
+    // A daemon started inside another Paseo agent holds a stale workspace ID. With none supplied for this opening, the sandbox sees it empty.
+    process.env.PASEO_WORKSPACE_ID = "ws-stale-daemon";
+    results[`${route} without a workspace`] = await launch(provider, withoutWorkspace, metadata);
+    expected[`${route} without a workspace`] = { ...identity, ...absent, PASEO_WORKSPACE_ID: "", PASEO_HOME: base, other: [] };
+    delete process.env.PASEO_WORKSPACE_ID;
+  }
+  for (const [label, result] of Object.entries(results)) t.diagnostic(`${label}: ${JSON.stringify(result)}`);
+  assert.deepEqual(results, expected);
 });
