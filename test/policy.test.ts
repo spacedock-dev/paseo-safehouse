@@ -7,6 +7,7 @@ import os from "node:os";
 import { emptyPolicy, parsePolicy, renderPolicy } from "../shared/policy";
 import {
   atomicJson,
+  gitAccess,
   hash,
   macOnly,
   policyEnvironment,
@@ -15,6 +16,7 @@ import {
   readSource,
   loadPolicy,
   resolvePolicy,
+  run,
   savePolicy,
 } from "../server/policy";
 import {
@@ -681,4 +683,54 @@ test("RPC contracts construct through the SDK and routing requires a boolean", a
   const { routingRpc } = await import("../shared/contracts");
   assert.deepEqual(routingRpc.input.parse({ workspaceId: "fixture", enabled: false }), { workspaceId: "fixture", enabled: false });
   assert.throws(() => routingRpc.input.parse({ workspaceId: "fixture", enabled: "false" }));
+});
+
+// Fixture repositories use a fixed identity and ignore the host's git configuration.
+const git = (cwd: string, ...args: string[]) => run("git", [
+  "-c", "user.name=Safehouse Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args,
+], { cwd, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+
+test("git access matches Safehouse's worktree detection and follows only links that point back", async (t) => {
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-test-")));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const [main, wt, rel, sibling, colon, outside, moved, late, root] =
+    ["main", "wt", "rel", "sibling", "co:lon", "outside", "moved", "late", "state"].map((name) => path.join(base, name));
+  for (const dir of [main, outside]) await fs.mkdir(dir);
+  await git(main, "init", "-q", "-b", "main");
+  await fs.writeFile(path.join(main, "file"), "base\n");
+  await git(main, "add", "file");
+  await git(main, "commit", "-qm", "init");
+  for (const dir of [wt, sibling, colon]) await git(main, "worktree", "add", "-q", "--detach", dir);
+  await git(main, "worktree", "add", "-q", "--detach", "--relative-paths", rel);
+  await fs.mkdir(path.join(wt, "sub"));
+  const common = path.join(main, ".git"), none = { commonDir: null, worktrees: [] };
+  const access = async (cwd: string) => {
+    const result = await gitAccess(cwd);
+    return { ...result, worktrees: [...result.worktrees].sort() };
+  };
+  // A linked worktree gets its common dir and the other worktrees; the colon path cannot be a configuration value.
+  assert.deepEqual(await access(wt), { commonDir: common, worktrees: [main, rel, sibling] });
+  assert.deepEqual(await access(rel), { commonDir: common, worktrees: [main, sibling, wt] });
+  assert.deepEqual(await access(main), { commonDir: null, worktrees: [rel, sibling, wt] });
+  for (const dir of [path.join(wt, "sub"), outside]) assert.deepEqual(await access(dir), none);
+  // The digest covers the git access, and the snapshot writes it after the workspace grant.
+  const before = await resolvePolicy("", wt, []);
+  const snapshot = await prepareSnapshot(root, before);
+  assert.equal(await fs.readFile(path.join(snapshot, ".safehouse"), "utf8"), [
+    `add-dirs=${wt}`, `add-dirs=${common}`, `add-dirs-ro=${main}`, `add-dirs-ro=${rel}`, `add-dirs-ro=${sibling}`,
+    `append-profile=${path.join(snapshot, "workspace.sb")}`, ""].join("\n"));
+  await git(main, "worktree", "add", "-q", "--detach", late);
+  const after = await resolvePolicy("", wt, []);
+  assert.notEqual(after.digest, before.digest);
+  assert.ok(after.git.worktrees.includes(late));
+  // A workspace outside any repository keeps the same snapshot lines.
+  const plain = await prepareSnapshot(root, await resolvePolicy("", outside, []));
+  assert.equal(await fs.readFile(path.join(plain, ".safehouse"), "utf8"),
+    `add-dirs=${outside}\nappend-profile=${path.join(plain, "workspace.sb")}\n`);
+  // A moved worktree's admin dir still names the old path, so it gets no access until git repairs the link.
+  await fs.rename(sibling, moved);
+  assert.deepEqual(await access(moved), none);
+  assert.deepEqual(await access(wt), { commonDir: common, worktrees: [late, main, rel] });
+  await git(moved, "worktree", "repair");
+  assert.deepEqual(await access(moved), { commonDir: common, worktrees: [late, main, rel, wt] });
 });
