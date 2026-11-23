@@ -29,6 +29,7 @@ import {
   policyEnvironment,
   policyRevision,
   prepareSnapshot,
+  paseoIdentityNames,
   providerEnvironmentNames,
   readJson,
   readSource,
@@ -582,7 +583,7 @@ async function prepareWrappedOpening(request: PluginSessionOpenRequest, paseo: P
   const saved = await ready(paseo);
   if (!saved.wrapLauncher) throw launchError(request.provider, "Refresh providers in the Safehouse panel to wrap this provider");
   const env = await prepareSession(request, saved);
-  const names = [...new Set([...providerEnvironmentNames(Object.keys(request.env ?? {})), "PASEO_HOME"])].join(",");
+  const names = [...new Set([...providerEnvironmentNames(Object.keys(request.env ?? {})), "PASEO_HOME", ...paseoIdentityNames])].join(",");
   const wrap = ["/bin/sh", saved.wrapLauncher, names, saved.wrapProfiles?.[request.provider] ?? "",
     (wrapGrants[request.provider]?.enable ?? []).join(",")];
   return { ...request, env, wrap };

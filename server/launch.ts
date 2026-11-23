@@ -1,5 +1,5 @@
 import path from "node:path";
-import { providerEnvironmentNames } from "./policy";
+import { paseoIdentityNames, providerEnvironmentNames } from "./policy";
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 
@@ -26,7 +26,7 @@ export function renderBootstrap(input: {
   const snapshots = path.join(root, "snapshots");
   // Account names reach only prepared sessions, after the host validates each value.
   const accountNames = providerEnvironmentNames(input.accountEnv ?? []);
-  const sessionEnvironment = ` --env-pass=${quote([...new Set([...names, ...accountNames])].join(","))}`;
+  const sessionEnvironment = ` --env-pass=${quote([...new Set([...names, ...paseoIdentityNames, ...accountNames])].join(","))}`;
   const home = quote(path.dirname(root)), state = quote(root);
   const accountFunctions = accountNames.length ? `account_fail() {
   echo "Safehouse: $1 $2" >&2

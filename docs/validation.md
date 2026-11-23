@@ -84,6 +84,10 @@ Where the host also offers the plugin requirement, the agent must refuse to open
 Offline, `test/launch-wrap.test.ts` checks route selection, the route record and the launcher. Set `PASEO_LAUNCH_WRAP_SERVER` to a built Paseo server with the launch wrapper to validate the open result with its schema.
 `test/sandbox.mac.test.ts` runs the wrap launcher under the installed Safehouse.
 
+In the same file, the identity case opens a derived and a wrapped agent through the plugin and starts each launcher under the installed Safehouse with Paseo's identity overlay.
+The session must see `PASEO_AGENT_ID`, `PASEO_WORKSPACE_ID` and `PASEO_AGENT_CWD` with the overlay values and no other `PASEO_*` or `SAFEHOUSE_*` name except `PASEO_HOME`.
+Decoy `PASEO_HOST`, `PASEO_URL`, `PASEO_SOCKET`, token, `DYLD_*` and `NODE_OPTIONS` values stay absent. A stale daemon `PASEO_WORKSPACE_ID` arrives empty when Paseo supplies none.
+
 ## Repeatable probes
 
 Run `npm run typecheck` and `npm test` with a working Node installation and an installed Safehouse binary.
