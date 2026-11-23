@@ -533,13 +533,13 @@ test("a linked worktree workspace gets Safehouse's own git access on both routes
   await fs.writeFile(bootstrap, renderBootstrap({ root, binary, guard, executable: process.execPath, host: "claude" }));
   await fs.writeFile(wrap, renderWrapLauncher({ root, binary, guard, features: [] }));
   const prepared = async (cwd: string) => prepareSnapshot(root, await loadPolicy(cwd, []));
-  const launch = async (route: string, snapshot: string, body: string) => JSON.parse((await run("/bin/sh",
+  const launch = async (route: string, snapshot: string, body: string, cwd = wt) => JSON.parse((await run("/bin/sh",
     [...(route === "bootstrap" ? [bootstrap] : [wrap, "PASEO_HOME", "", "", process.execPath]), "-e",
       `const fs=require('node:fs'),cp=require('node:child_process');const r={};
 const a=(k,f)=>{try{r[k]=f()??'allowed'}catch(e){r[k]=e.status??e.code}};
 const git=(...args)=>cp.execFileSync(${q(gitBinary)},${q(flags)}.concat(args),{stdio:'pipe'}).toString();
 ${body};console.log(JSON.stringify(r));`],
-    { cwd: wt, env: policyEnvironment(process.env, snapshot), timeout: 45000 })).stdout);
+    { cwd, env: policyEnvironment(process.env, snapshot), timeout: 45000 })).stdout);
   await t.test("git status, diff and commit work under both launchers, and nothing else is granted", async () => {
     for (const route of ["bootstrap", "wrap"]) {
       const result = await launch(route, await prepared(wt), `fs.writeFileSync('canary','changed by ${route}\\n');
@@ -598,6 +598,24 @@ a('marker',()=>fs.writeFileSync('.git',${q(`gitdir: ${staged}\n`)}))`,
       expected[name] = { forged: Object.fromEntries(Object.keys(forged).map((key) => [key, "allowed"])), named: false, probe: { read: "EPERM", readWorktree: "EPERM", write: "EPERM" } };
       await fs.writeFile(marker, original);
       for (const dir of [staged, evil]) await fs.rm(dir, { recursive: true, force: true });
+    }
+    t.diagnostic(q(results));
+    assert.deepEqual(results, expected);
+  });
+  await t.test("a workspace in a folder named worktrees cannot make itself the admin dir of its grandparent", async () => {
+    // Claude Code's `<repo>/.claude/worktrees/<name>` and a user's `~/worktrees/<name>`.
+    const layouts = { claude: path.join(main, ".claude", "worktrees", "cc"), home: path.join(base, "home", "worktrees", "hw") };
+    const results: Record<string, unknown> = {}, expected: Record<string, unknown> = {};
+    for (const [name, workspace] of Object.entries(layouts)) {
+      await git(main, "worktree", "add", "-q", "--detach", workspace);
+      const grandparent = path.dirname(path.dirname(workspace)), target = path.join(grandparent, "settings.json");
+      const forged = await launch("bootstrap", await prepared(workspace), `a('HEAD',()=>fs.writeFileSync('HEAD','ref: refs/heads/main\\n'));
+a('commondir',()=>fs.writeFileSync('commondir','../..\\n'));a('gitdir',()=>fs.writeFileSync('gitdir',${q(path.join(workspace, ".git") + "\n")}));
+a('marker',()=>fs.writeFileSync('.git','gitdir: .\\n'))`, workspace);
+      const next = await prepared(workspace);
+      const probe = await launch("wrap", next, `a('write',()=>fs.writeFileSync(${q(target)},'x'))`, workspace);
+      results[name] = { forged, named: (await fs.readFile(path.join(next, ".safehouse"), "utf8")).includes(`add-dirs=${grandparent}\n`), probe };
+      expected[name] = { forged: { HEAD: "allowed", commondir: "allowed", gitdir: "allowed", marker: "allowed" }, named: false, probe: { write: "EPERM" } };
     }
     t.diagnostic(q(results));
     assert.deepEqual(results, expected);
