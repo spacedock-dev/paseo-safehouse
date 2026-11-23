@@ -137,6 +137,61 @@ function policyPath(value: string, exact = true) {
     throw new Error(`Safehouse cannot grant a path that begins or ends with whitespace: ${quotePath(value)}`);
   return value;
 }
+// The canonical path that the first line of a regular file under 4 KB names, resolved against the file's folder.
+// A `.git` link is never followed, and git is never run on repository files that an agent can write.
+async function gitLink(file: string, prefix = "") {
+  try {
+    const stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.size >= 4096) return null;
+    const line = (await fs.readFile(file, "utf8")).split("\n")[0];
+    if (!line.startsWith(prefix) || line.length === prefix.length) return null;
+    return await fs.realpath(path.resolve(path.dirname(file), line.slice(prefix.length)));
+  } catch {
+    return null;
+  }
+}
+const gitIs = (file: string, kind: "isFile" | "isDirectory") => fs.stat(file).then((s) => s[kind](), () => false);
+const expressible = (value: string) => { try { return !!policyPath(value); } catch { return false; } };
+/**
+ * Safehouse's own git access for a workspace that is a worktree root: read-write on a linked worktree's common dir,
+ * read-only on the repository's other worktrees. Each link must point back, so files a sandboxed process can
+ * write cannot aim a later launch at another folder:
+ * 1. the active admin dir is `<common>/worktrees/<id>`;
+ * 2. the admin dir's `gitdir` names `<cwd>/.git`;
+ * 3. a listed worktree's own `.git` names its admin dir, and the main checkout's `.git` is the common dir.
+ */
+export async function gitAccess(cwd: string): Promise<{ commonDir: string | null; worktrees: string[] }> {
+  const none = { commonDir: null, worktrees: [] };
+  const marker = path.join((cwd = await fs.realpath(cwd).catch(() => cwd)), ".git");
+  const stat = await fs.lstat(marker).catch(() => null);
+  let common: string, commonDir: string | null = null;
+  const worktrees: string[] = [];
+  if (stat?.isDirectory()) {
+    if (!(await gitIs(path.join(marker, "HEAD"), "isFile")) || !(await gitIs(path.join(marker, "objects"), "isDirectory")) ||
+      !(await gitIs(path.join(marker, "refs"), "isDirectory"))) return none;
+    common = marker;
+  } else if (stat?.isFile()) {
+    const admin = await gitLink(marker, "gitdir: ");
+    if (!admin || !(await gitIs(path.join(admin, "HEAD"), "isFile"))) return none;
+    const found = await gitLink(path.join(admin, "commondir"));
+    if (!found || path.dirname(admin) !== path.join(found, "worktrees")) return none; // Check 1.
+    if ((await gitLink(path.join(admin, "gitdir"))) !== marker) return none; // Check 2.
+    common = commonDir = found;
+    // Check 3 for the main checkout: a canonical common dir named .git is its `.git` folder.
+    if (path.basename(common) === ".git") worktrees.push(path.dirname(common));
+  } else return none;
+  const entries = path.join(common, "worktrees");
+  for (const name of (await fs.readdir(entries).catch(() => [])).sort()) {
+    const entry = path.join(entries, name), target = await gitLink(path.join(entry, "gitdir"));
+    // Check 3: the worktree's own `.git` names this entry by its canonical path.
+    if (target && path.basename(target) === ".git" && (await gitLink(target, "gitdir: ")) === entry)
+      worktrees.push(path.dirname(target));
+  }
+  return {
+    commonDir: commonDir && expressible(commonDir) ? commonDir : null,
+    worktrees: [...new Set(worktrees)].filter((dir) => dir !== cwd && expressible(dir)),
+  };
+}
 export async function resolvePolicy(
   raw: string,
   cwd: string,
@@ -185,6 +240,7 @@ export async function resolvePolicy(
     readWrite,
     enable: [...new Set(parsed.enable)],
     profiles,
+    git: await gitAccess(cwd),
   };
   return { ...policy, digest: hash(JSON.stringify(policy)) };
 }
@@ -231,6 +287,9 @@ export async function prepareSnapshot(root: string, policy: ResolvedPolicy, daem
     lines.push(
       ...policy.readOnly.map((p) => `add-dirs-ro=${policyPath(p)}`),
       ...policy.readWrite.map((p) => `add-dirs=${policyPath(p)}`),
+      // Safehouse's own worktree access, which it grants only to a workdir it detects itself.
+      ...(policy.git.commonDir ? [`add-dirs=${policyPath(policy.git.commonDir)}`] : []),
+      ...policy.git.worktrees.map((p) => `add-dirs-ro=${policyPath(p)}`),
     );
     lines.push(...policy.enable.map((f) => `enable=${f}`));
     for (let i = 0; i < policy.profiles.length; i++) {
