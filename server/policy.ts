@@ -151,12 +151,15 @@ async function gitLink(file: string, prefix = "") {
   }
 }
 const gitIs = (file: string, kind: "isFile" | "isDirectory") => fs.stat(file).then((s) => s[kind](), () => false);
+// Safehouse's repository-root test: a git dir holds a `HEAD` file and `objects` and `refs` folders.
+const gitRepo = async (dir: string) => (await gitIs(path.join(dir, "HEAD"), "isFile")) &&
+  (await gitIs(path.join(dir, "objects"), "isDirectory")) && (await gitIs(path.join(dir, "refs"), "isDirectory"));
 const expressible = (value: string) => { try { return !!policyPath(value); } catch { return false; } };
 /**
  * Safehouse's own git access for a workspace that is a worktree root: read-write on a linked worktree's common dir,
  * read-only on the repository's other worktrees. Each link must point back, so files a sandboxed process can
  * write cannot aim a later launch at another folder:
- * 1. the active admin dir is `<common>/worktrees/<id>`;
+ * 1. the active admin dir is `<common>/worktrees/<id>`, and the common dir passes Safehouse's repository-root test;
  * 2. the admin dir's `gitdir` names `<cwd>/.git`;
  * 3. a listed worktree's own `.git` names its admin dir, and the main checkout's `.git` is the common dir.
  */
@@ -167,14 +170,14 @@ export async function gitAccess(cwd: string): Promise<{ commonDir: string | null
   let common: string, commonDir: string | null = null;
   const worktrees: string[] = [];
   if (stat?.isDirectory()) {
-    if (!(await gitIs(path.join(marker, "HEAD"), "isFile")) || !(await gitIs(path.join(marker, "objects"), "isDirectory")) ||
-      !(await gitIs(path.join(marker, "refs"), "isDirectory"))) return none;
+    if (!(await gitRepo(marker))) return none;
     common = marker;
   } else if (stat?.isFile()) {
     const admin = await gitLink(marker, "gitdir: ");
     if (!admin || !(await gitIs(path.join(admin, "HEAD"), "isFile"))) return none;
     const found = await gitLink(path.join(admin, "commondir"));
-    if (!found || path.dirname(admin) !== path.join(found, "worktrees")) return none; // Check 1.
+    // Check 1. The shape test stops a workspace in a folder named `worktrees` from serving as its own admin dir.
+    if (!found || path.dirname(admin) !== path.join(found, "worktrees") || !(await gitRepo(found))) return none;
     if ((await gitLink(path.join(admin, "gitdir"))) !== marker) return none; // Check 2.
     common = commonDir = found;
     // Check 3 for the main checkout: a canonical common dir named .git is its `.git` folder.
