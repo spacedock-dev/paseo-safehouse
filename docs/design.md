@@ -155,7 +155,7 @@ Both bootstrap branches pass these names through Safehouse. The bootstrap contai
 Policy, loader, Node and shell-control variables remain blocked.
 The plugin supplies the captured daemon home through `PASEO_HOME` and passes it explicitly through Safehouse. Other `PASEO_*` variables remain masked. Unlisted daemon variables retain Safehouse’s default sanitization.
 Session launches of both routes also pass `PASEO_AGENT_ID`, `PASEO_WORKSPACE_ID` and `PASEO_AGENT_CWD`. Paseo sets these identifiers for the agent after the open hook returns, and its values replace the plugin's empty masks. A name that Paseo omits keeps its empty mask, so a stale daemon value never reaches the session. Catalog discovery has no agent and passes only `PASEO_HOME`.
-Configuration cannot add any `PASEO_*` name. The identifiers grant no path, port or credential, and the daemon broker ignores claimed agent IDs.
+Configuration cannot add any `PASEO_*` name. The identifiers grant no path, port or credential. Per-agent access uses Paseo's own `request.agentId` from the open hook, not these variables.
 Ordinary provider configuration remains intact. Installation rejects collisions with unrelated provider entries.
 Explicit command arrays support built-in factories and direct derivatives of those factories.
 A derived variant extends the same built-in and retains source overrides, including native environment and tool-restriction inheritance.
