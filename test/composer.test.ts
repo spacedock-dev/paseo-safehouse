@@ -144,12 +144,15 @@ test("real 0.15 compiler loads old/new SDK exports and keeps composer/header exc
       assert.equal(control.type, Select); assert.equal(control.props.value, "off"); assert.equal(control.props.disabled, true);
       assert.equal(control.props.title, title);
       assert.equal(control.props.options[0].description, `Unavailable: ${reason}`);
-      assert.ok(forced.props.children.some((child: any) => child?.type === "Text" && child.props.children === title), "reason beside the control");
+      assert.equal(control.props.options[1].description, `Run this new agent without Safehouse. ${title}.`);
+      // The control is the item's only node: no beside text widens the toolbar item, and no wrapper sizes the sheet row.
+      assert.equal(forced.type, "fragment", "no wrapper view around the control");
+      assert.deepEqual(forced.props.children.filter(Boolean), [control], "no text beside the control");
       const forcedWrites = writes; await planned(); assert.equal(writes, forcedWrites, "a forced Off is written once");
       composer.agent.provider = "pi"; await planned();
       assert.equal(metadata["paseo-safehouse.launch"], true); assert.equal("paseo-safehouse.launch-unavailable" in metadata, false);
       assert.equal(select().props.value, "on"); assert.equal(select().props.disabled, false);
-      assert.equal(render().props.children.some((child: any) => child?.type === "Text" && child.props.children === title), false);
+      assert.equal(select().props.title, "Safehouse"); assert.equal(select().props.options[1].description, "Run this new agent without Safehouse.");
       // A rejected write shows the failure, claims no choice, and is not retried for the same draft state.
       composer.agent.provider = "antigravity"; rejectWrite = true; await planned();
       assert.equal(metadata["paseo-safehouse.launch"], true);
@@ -225,6 +228,17 @@ test("real 0.15 compiler loads old/new SDK exports and keeps composer/header exc
       assert.deepEqual(panelCalls.map(([name]) => name), ["safehouse.set-workspace-routing", "safehouse.status"]);
       assert.equal(panelCalls[0][1].workspaceId, "workspace"); assert.equal(panelCalls[0][1].enabled, true);
       assert.equal(state[3].routingEnabled, true); assert.equal(state[8], "unsaved policy"); assert.equal(state[11], true);
+      // The experimental wrap button appears only on a host whose providers have the launch wrapper.
+      const texts = (node: any): string[] => !node ? [] : Array.isArray(node) ? node.flatMap(texts) : typeof node === "string" ? [node]
+        : [...(node.props?.accessibilityLabel ? [node.props.accessibilityLabel] : []), ...texts(node.props?.children)];
+      const experimentalPanel = (launchWrapHost: boolean) => {
+        state = [false, false, "", { ...panelStatus, experimentalWrap: false, launchWrapHost }, "", "", "", false, "unsaved policy", "", "file", true]; stateIndex = 0;
+        return texts(panel.Component({ workspaceId: "workspace", theme: { colors: {} }, layout: { compact: false } })).join("");
+      };
+      const needsWrapper = "This setting needs a Paseo version with the launch wrapper.";
+      assert.match(experimentalPanel(true), /Turn on experimental wrap/); assert.doesNotMatch(experimentalPanel(true), new RegExp(needsWrapper));
+      assert.doesNotMatch(experimentalPanel(false), /Turn on experimental wrap/); assert.match(experimentalPanel(false), new RegExp(needsWrapper));
+      assert.match(experimentalPanel(false), /Saved: Off\. Applies to new agents on this daemon/);
     }
     if (mode === "rpc-failure") {
       rpcFails = false; intervals[0](); await new Promise(resolve => setImmediate(resolve));

@@ -274,6 +274,32 @@ test("status and availability list a provider as unavailable exactly where creat
   }
 });
 
+test("a setup-time entry for a provider the host now wraps gives way to the computed reason", { skip: process.platform !== "darwin" }, async (t) => {
+  // Setup ran before the host offered launchWrap, so the saved map holds the unsupported text for antigravity.
+  let snapshot: (() => Promise<unknown>) | undefined;
+  const { base, paseo } = await fixture(t, () => snapshot ? snapshot() : Promise.resolve({ entries: [] }), { antigravity: { enabled: true } });
+  const saved = JSON.parse(await fs.readFile(path.join(base, "safehouse", "installation.json"), "utf8"));
+  assert.match(`SafehouseLaunchError: ${saved.unavailable.antigravity}`, unsupported("antigravity"));
+  snapshot = supporting;
+  for (const [setting, reason] of [
+    ["off", "turn on Experimental: sandbox plugin-supplied providers in the Safehouse panel"],
+    ["invalid", "the experimental setting is unreadable; choose it again in the Safehouse panel"],
+    ["on", undefined],
+  ] as const) {
+    await experimentalWrap(base, setting);
+    const { unavailable } = await status(paseo, "fixture") as { unavailable: Record<string, string> };
+    assert.deepEqual((await service.composerAvailability(paseo) as { unavailable?: Record<string, string> }).unavailable, unavailable);
+    assert.equal(unavailable.antigravity, reason, setting);
+  }
+});
+
+test("status reports whether any provider on this host has the launch wrapper", { skip: process.platform !== "darwin" }, async (t) => {
+  for (const [snapshot, expected] of [[supporting, true], [async () => ({ entries: [{ provider: "antigravity", status: "ready" }] }), false], [undefined, false]] as const) {
+    const { paseo } = await fixture(t, snapshot, { antigravity: { enabled: true } });
+    assert.equal((await status(paseo, "fixture") as { launchWrapHost?: boolean }).launchWrapHost, expected);
+  }
+});
+
 test("the experimental wrap setting is stored per daemon under the Safehouse state root", { skip: process.platform !== "darwin" }, async (t) => {
   const { base, paseo } = await fixture(t, supporting);
   const experimental = async () => (await status(paseo, "fixture") as { experimentalWrap?: boolean | null }).experimentalWrap;
