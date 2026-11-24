@@ -7,6 +7,7 @@ import path from "node:path";
 import * as launch from "../server/launch";
 import { atomicJson, hash, run } from "../server/policy";
 import { prepareOpening, reload, routeCreation, setup, setWorkspaceRouting, status } from "../server/service";
+import * as service from "../server/service";
 import { launchMetadataKey } from "../shared/contracts";
 
 // Optional: the built server of a Paseo host with the launch-wrap hook, to validate open results with its own schema.
@@ -19,6 +20,17 @@ const host = hostServer
 const routeKey = "paseo-safehouse.route";
 const unsupported = (id: string) =>
   new RegExp(`^SafehouseLaunchError: ${id} is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed\\.$`);
+const optIn = (id: string) => new RegExp(`^SafehouseLaunchError: Safehouse provider ${id}: this Paseo host cannot keep Safehouse required for this agent, ` +
+  `so after the Safehouse plugin is disabled, removed or fails, a later open would start it without Safehouse\\. To accept this, turn on ` +
+  `"Experimental: sandbox plugin-supplied providers" in the Safehouse panel\\. Otherwise start it with Safehouse Off\\.$`);
+const invalidSetting = /^SafehouseLaunchError: The Safehouse experimental wrap setting is unreadable or invalid\. Choose the setting again in the Safehouse panel\.$/;
+const settingFile = (base: string) => path.join(base, "safehouse", "experimental-wrap.json");
+// The three states of the per-daemon setting: missing (Off), On, and an invalid file.
+async function experimentalWrap(base: string, state: "off" | "on" | "invalid") {
+  await fs.rm(settingFile(base), { force: true });
+  if (state === "on") assert.deepEqual(await (service as any).setExperimentalWrap(true), { enabled: true });
+  if (state === "invalid") await fs.writeFile(settingFile(base), JSON.stringify({ enabled: "yes" }));
+}
 
 async function fixture(t: test.TestContext, snapshot?: () => Promise<unknown>, extraProviders: Record<string, any> = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "safehouse-wrap-")));
@@ -71,21 +83,37 @@ test("a host without launchWrap keeps the refusal and today's derived routes", {
     async () => { throw new Error("snapshot unavailable"); },
   ]) {
     const { base, paseo, open } = await fixture(t, snapshot);
-    for (const extra of [{}, { requirePlugin: false }]) {
-      await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" }, ...extra } as any, paseo), unsupported("antigravity"));
-      for (const provider of ["claude", "codex"]) {
-        const request = { config: { cwd: base, provider, model: "small" }, ...extra };
-        const routed = await routeCreation(request as any, paseo) as any;
-        assert.equal(routed.config.provider, `safehouse-${provider}`);
-        // No new key reaches a host that did not send it.
-        assert.deepEqual(Object.keys(routed).sort(), Object.keys(request).sort());
-        assert.equal(routed.requirePlugin, (extra as any).requirePlugin);
+    // Derived routes never read the experimental setting, and the host check comes before it.
+    const results: Record<string, unknown[]> = {};
+    for (const setting of ["off", "on", "invalid"] as const) {
+      await experimentalWrap(base, setting);
+      results[setting] = [];
+      for (const extra of [{}, { requirePlugin: false }]) {
+        await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" }, ...extra } as any, paseo), unsupported("antigravity"));
+        // A draft that Safehouse switched Off passes unchanged.
+        const forcedOff = { config: { cwd: base, provider: "antigravity" }, metadata: { [launchMetadataKey]: false, "paseo-safehouse.launch-unavailable": "antigravity" }, ...extra };
+        assert.equal(await routeCreation(forcedOff as any, paseo), forcedOff);
+        for (const provider of ["claude", "codex", "pi"]) {
+          const request = { config: { cwd: base, provider, model: "small" }, ...extra };
+          const routed = await routeCreation(request as any, paseo) as any;
+          assert.equal(routed.config.provider, `safehouse-${provider}`);
+          // No new key reaches a host that did not send it.
+          assert.deepEqual(Object.keys(routed).sort(), Object.keys(request).sort());
+          assert.equal(routed.requirePlugin, (extra as any).requirePlugin);
+          results[setting].push(routed);
+        }
+      }
+      // A derived open is unchanged: env only, no wrap.
+      for (const provider of ["safehouse-claude", "safehouse-codex", "safehouse-pi"]) {
+        const derived = await prepareOpening(open(`agent-${provider}`, provider, "create"), paseo) as any;
+        assert.equal("wrap" in derived, false);
+        assert.match(derived.env.SAFEHOUSE_WORKDIR, new RegExp(`^${base}/safehouse/snapshots/`));
+        const { SAFEHOUSE_WORKDIR: _, ...env } = derived.env;
+        results[setting].push({ ...derived, env });
       }
     }
-    // A derived open is unchanged: env only, no wrap.
-    const derived = await prepareOpening(open("agent-d", "safehouse-claude", "create"), paseo) as any;
-    assert.equal("wrap" in derived, false);
-    assert.match(derived.env.SAFEHOUSE_WORKDIR, new RegExp(`^${base}/safehouse/snapshots/`));
+    assert.deepEqual(results.on, results.off);
+    assert.deepEqual(results.invalid, results.off);
   }
 });
 
@@ -99,9 +127,26 @@ test("create selects the wrap route with launchWrap, and adds the plugin require
   assert.deepEqual(routed.config, input.config);
   assert.deepEqual(routed.metadata, { kept: 1, [routeKey]: "wrap" });
   assert.equal(routed.requirePlugin, true);
-  // launchWrap without the requirement signal (CL's ruling of 2026-11-21): wrapped, with no requirePlugin key,
-  // because the strict create schema of such a host rejects it.
+  // launchWrap without the requirement signal and with the experimental setting Off (missing): refused, naming the setting.
   const plain = { config: { cwd: base, provider: "antigravity", model: "small" }, metadata: { kept: 1 } };
+  await assert.rejects(routeCreation(plain, paseo), optIn("antigravity"));
+  await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" } }, paseo), optIn("antigravity"));
+  // An invalid setting refuses only that path; the requirement signal does not read the setting.
+  await experimentalWrap(base, "invalid");
+  await assert.rejects(routeCreation(plain, paseo), invalidSetting);
+  for (const setting of ["off", "invalid"] as const) {
+    await experimentalWrap(base, setting);
+    const required = await routeCreation(structuredClone(input), paseo) as any;
+    assert.deepEqual(required, { ...input, metadata: { kept: 1, [routeKey]: "wrap" }, requirePlugin: true });
+    // A provider the host cannot wrap is refused before the setting is read.
+    await assert.rejects(routeCreation({ config: { cwd: base, provider: "muse" } } as any, paseo), unsupported("muse"));
+    // A draft that Safehouse switched Off passes unchanged.
+    const forcedOff = { config: { cwd: base, provider: "antigravity" }, metadata: { [launchMetadataKey]: false, "paseo-safehouse.launch-unavailable": "antigravity" } };
+    assert.equal(await routeCreation(forcedOff as any, paseo), forcedOff);
+  }
+  // With the setting On, the 0.5.0 result: wrapped, with no requirePlugin key,
+  // because the strict create schema of such a host rejects it.
+  await experimentalWrap(base, "on");
   const wrapped = await routeCreation(plain, paseo) as any;
   assert.deepEqual(wrapped, { ...plain, metadata: { kept: 1, [routeKey]: "wrap" } });
   assert.equal("requirePlugin" in wrapped, false);
@@ -125,6 +170,7 @@ test("open returns the wrap for the recorded agent only, on every later open", {
   const { base, paseo, agents, reloaded, open } = await fixture(t, supporting);
   const installation = JSON.parse(await fs.readFile(path.join(base, "safehouse", "installation.json"), "utf8"));
   assert.ok(installation.wrapLauncher?.startsWith(`${base}/safehouse/launchers/wrap-`));
+  await experimentalWrap(base, "on");
   const created = open("agent-1", "antigravity", "create", { [routeKey]: "wrap" });
   const result = await prepareOpening(created, paseo) as any;
   // Antigravity gets its grant profile and Safehouse's keychain integration.
@@ -141,9 +187,13 @@ test("open returns the wrap for the recorded agent only, on every later open", {
     assert.deepEqual(merged.wrap, result.wrap);
   }
   // Resume and history opens carry no route metadata; the durable record selects the wrap.
-  for (const [reason, purpose] of [["resume", "interactive"], ["refresh", "history"], ["create", "interactive"]]) {
-    const later = await prepareOpening({ ...open("agent-1", "antigravity", reason), purpose } as any, paseo) as any;
-    assert.deepEqual(later.wrap, result.wrap);
+  // Opens never read the experimental setting: the agent stays wrapped after it is turned Off or becomes invalid.
+  for (const setting of ["off", "invalid", "on"] as const) {
+    await experimentalWrap(base, setting);
+    for (const [reason, purpose] of [["resume", "interactive"], ["refresh", "history"], ["create", "interactive"]]) {
+      const later = await prepareOpening({ ...open("agent-1", "antigravity", reason), purpose } as any, paseo) as any;
+      assert.deepEqual(later.wrap, result.wrap);
+    }
   }
   // Metadata alone never makes an existing agent wrapped: with the marker and no record the open is refused,
   // and an agent without the marker or the record is untouched.
@@ -196,12 +246,48 @@ test("a later open with the route marker but no route record is refused", { skip
   assert.equal(await prepareOpening(ordinary, paseo), ordinary);
 });
 
-test("Refresh providers lists a configured provider as unsupported only where creation refuses it", { skip: process.platform !== "darwin" }, async (t) => {
-  for (const [snapshot, listed] of [[supporting, ["muse"]], [undefined, ["antigravity", "muse"]]] as const) {
-    const { paseo } = await fixture(t, snapshot, { antigravity: { enabled: true }, muse: { enabled: true } });
+test("status and availability list a provider as unavailable exactly where creation of an On draft refuses it", { skip: process.platform !== "darwin" }, async (t) => {
+  const optInReason = "turn on Experimental: sandbox plugin-supplied providers in the Safehouse panel";
+  for (const [snapshot, setting, listed] of [
+    [supporting, "off", { antigravity: optInReason, muse: "unsupported" }],
+    [supporting, "on", { muse: "unsupported" }],
+    [supporting, "invalid", { antigravity: "the experimental setting is unreadable; choose it again in the Safehouse panel", muse: "unsupported" }],
+    [undefined, "off", { antigravity: "unsupported", muse: "unsupported" }],
+    [undefined, "on", { antigravity: "unsupported", muse: "unsupported" }],
+  ] as const) {
+    const { base, paseo } = await fixture(t, snapshot, { antigravity: { enabled: true }, muse: { enabled: true } });
+    await experimentalWrap(base, setting);
     const { unavailable } = await status(paseo, "fixture") as { unavailable: Record<string, string> };
-    assert.deepEqual(Object.keys(unavailable).sort(), listed);
-    for (const id of listed) assert.match(`SafehouseLaunchError: ${unavailable[id]}`, unsupported(id));
+    const composer = await service.composerAvailability(paseo) as { unavailable?: Record<string, string> };
+    assert.deepEqual(composer.unavailable, unavailable);
+    assert.deepEqual(Object.keys(unavailable).sort(), Object.keys(listed));
+    for (const [id, reason] of Object.entries(listed)) {
+      if (reason === "unsupported") assert.match(`SafehouseLaunchError: ${unavailable[id]}`, unsupported(id));
+      else assert.equal(unavailable[id], reason);
+    }
+    // The map agrees with creation of an On draft, for every configured provider.
+    for (const id of ["antigravity", "muse", "claude", "codex", "pi"]) {
+      const created = routeCreation({ config: { cwd: base, provider: id, model: "small" }, metadata: { [launchMetadataKey]: true } } as any, paseo);
+      if (id in unavailable) await assert.rejects(created, /^SafehouseLaunchError: /, `${id} ${setting}`);
+      else await created;
+    }
+  }
+});
+
+test("the experimental wrap setting is stored per daemon under the Safehouse state root", { skip: process.platform !== "darwin" }, async (t) => {
+  const { base, paseo } = await fixture(t, supporting);
+  const experimental = async () => (await status(paseo, "fixture") as { experimentalWrap?: boolean | null }).experimentalWrap;
+  assert.equal(await experimental(), false);
+  await assert.rejects(fs.access(settingFile(base)), { code: "ENOENT" });
+  assert.deepEqual(await (service as any).setExperimentalWrap(true), { enabled: true });
+  assert.deepEqual(JSON.parse(await fs.readFile(settingFile(base), "utf8")), { enabled: true });
+  assert.equal(await experimental(), true);
+  assert.deepEqual(await (service as any).setExperimentalWrap(false), { enabled: false });
+  assert.deepEqual(JSON.parse(await fs.readFile(settingFile(base), "utf8")), { enabled: false });
+  assert.equal(await experimental(), false);
+  for (const invalid of ["{", "[]", "null", JSON.stringify({ enabled: 1 })]) {
+    await fs.writeFile(settingFile(base), invalid);
+    assert.equal(await experimental(), null, invalid);
   }
 });
 
@@ -235,6 +321,7 @@ test("setup installs the wrap launcher on a host whose only providers are plugin
   assert.ok(installation.wrapLauncher?.startsWith(`${base}/safehouse/launchers/wrap-`));
   await fs.access(installation.wrapLauncher);
   assert.ok(installation.wrapProfiles?.antigravity);
+  await experimentalWrap(base, "on");
   const routed = await routeCreation({ config: { cwd: base, provider: "antigravity", model: "small" } }, paseo) as any;
   assert.equal(routed.metadata[routeKey], "wrap");
 });
@@ -246,6 +333,7 @@ test("an installation from before the wrap route asks for Refresh providers", { 
   assert.ok(wrapLauncher);
   await atomicJson(file, older);
   const refresh = /Refresh providers in the Safehouse panel to wrap this provider/;
+  await experimentalWrap(base, "on");
   for (const extra of [{}, { requirePlugin: false }])
     await assert.rejects(routeCreation({ config: { cwd: base, provider: "antigravity" }, ...extra } as any, paseo), refresh);
   await assert.rejects(prepareOpening(open("agent-1", "antigravity", "create", { [routeKey]: "wrap" }), paseo), refresh);

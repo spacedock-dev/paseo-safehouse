@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import vm from "node:vm";
 import { launchChoice } from "../shared/contracts";
+import * as contracts from "../shared/contracts";
 
 test("creation metadata accepts only absent or boolean namespaced values", () => {
   assert.equal(launchChoice(), undefined);
@@ -11,6 +12,34 @@ test("creation metadata accepts only absent or boolean namespaced values", () =>
   assert.equal(launchChoice({ "paseo-safehouse.launch": true }), true);
   for (const value of [null, "off", "false", 0, [], {}, undefined])
     assert.throws(() => launchChoice({ "paseo-safehouse.launch": value }), /must be a boolean/);
+});
+
+test("draftPlan forces Off for a provider with a reason and undoes only an Off that Safehouse wrote", () => {
+  const plan = (contracts as any).draftPlan as (input: {
+    provider: string | null; metadata: Record<string, unknown>; owned: readonly string[]; unavailable: Record<string, string>;
+  }) => Record<string, boolean | string | null> | null;
+  assert.equal(typeof plan, "function");
+  const launch = "paseo-safehouse.launch", key = "paseo-safehouse.launch-unavailable";
+  const unavailable = { antigravity: "this Paseo host cannot wrap it" };
+  const owned = ["safehouse-pi"];
+  for (const [provider, metadata, patch] of [
+    // An owned safehouse-* provider is fixed On.
+    ["safehouse-pi", { [launch]: false, [key]: "antigravity" }, null],
+    // A reason with On: Safehouse writes Off and marks it.
+    ["antigravity", { [launch]: true }, { [launch]: false, [key]: "antigravity" }],
+    // The user's own Off is never marked.
+    ["antigravity", { [launch]: false }, null],
+    ["antigravity", { [launch]: false, [key]: "antigravity" }, null],
+    // A forced Off carried over from another provider is marked for this one.
+    ["antigravity", { [launch]: false, [key]: "muse" }, { [key]: "antigravity" }],
+    // No reason: a forced Off returns to On, and a stale mark is removed.
+    ["pi", { [launch]: false, [key]: "antigravity" }, { [launch]: true, [key]: null }],
+    ["pi", { [launch]: true, [key]: "antigravity" }, { [key]: null }],
+    ["pi", { [launch]: false }, null],
+    ["pi", { [launch]: true }, null],
+    // Before the initial choice is written, nothing is planned.
+    ["antigravity", {}, null],
+  ] as const) assert.deepEqual(plan({ provider, metadata, owned, unavailable }), patch, `${provider} ${JSON.stringify(metadata)}`);
 });
 
 test("real 0.15 compiler loads old/new SDK exports and keeps composer/header exclusive", {
@@ -103,6 +132,30 @@ test("real 0.15 compiler loads old/new SDK exports and keeps composer/header exc
       composer.context = "draft"; rejectWrite = true; render(); flushLayout(); cleanup?.();
       const beforeCleanup = [...state]; await settle(); assert.deepEqual(state, beforeCleanup, "late failure ignores unmounted component");
       stop(); assert.equal(cleared, 1);
+      // A provider Safehouse cannot run on this host: Off is written and shown, On cannot be chosen, and On returns after a switch.
+      rejectWrite = false; composer.context = "draft"; composer.agent.provider = "antigravity"; metadata["paseo-safehouse.launch"] = true;
+      const reason = "this Paseo host cannot wrap it", title = `Safehouse unavailable for antigravity · ${reason}`;
+      composerRpc = async () => ({ ...available, unavailable: { antigravity: reason } });
+      const planned = async () => { effects.length = 0; render(); flushLayout(); (effects[2] as () => unknown)(); await settle(); };
+      effects.length = 0; render(); const stopReason = effects[0]() as () => void; await settle(); stopReason();
+      await planned();
+      assert.equal(metadata["paseo-safehouse.launch"], false); assert.equal(metadata["paseo-safehouse.launch-unavailable"], "antigravity");
+      const forced = render(); const control = forced.props.children[0];
+      assert.equal(control.type, Select); assert.equal(control.props.value, "off"); assert.equal(control.props.disabled, true);
+      assert.equal(control.props.title, title);
+      assert.equal(control.props.options[0].description, `Unavailable: ${reason}`);
+      assert.ok(forced.props.children.some((child: any) => child?.type === "Text" && child.props.children === title), "reason beside the control");
+      const forcedWrites = writes; await planned(); assert.equal(writes, forcedWrites, "a forced Off is written once");
+      composer.agent.provider = "pi"; await planned();
+      assert.equal(metadata["paseo-safehouse.launch"], true); assert.equal("paseo-safehouse.launch-unavailable" in metadata, false);
+      assert.equal(select().props.value, "on"); assert.equal(select().props.disabled, false);
+      assert.equal(render().props.children.some((child: any) => child?.type === "Text" && child.props.children === title), false);
+      // A rejected write shows the failure, claims no choice, and is not retried for the same draft state.
+      composer.agent.provider = "antigravity"; rejectWrite = true; await planned();
+      assert.equal(metadata["paseo-safehouse.launch"], true);
+      assert.notEqual(select().type, Select); assert.match(select().props.children[0].props.children, /Safehouse choice failed: Metadata rejected/);
+      const failedPlan = writes; await planned(); assert.equal(writes, failedPlan, "no rejection loop");
+      rejectWrite = false; composer.agent.provider = "pi"; delete metadata["paseo-safehouse.launch-unavailable"]; composerRpc = async () => available;
       // Literal receipt fixtures are independent of production label/locator helpers.
       let statusResult: any = { policyValid: true, agents: [{ id: "existing", provider: "safehouse-pi", preparedAt: "2026-11-12T00:00:00Z", changed: false }] };
       let lookupFails = false, lookupWorkspace = "workspace";
