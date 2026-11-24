@@ -68,8 +68,9 @@ Older hosts and unresolved session references retain the agent pill. Reload pres
 The workspace toggle does not change existing agents. Explicit Safehouse providers always use the sandbox.
 
 Providers from Paseo plugins, such as Antigravity, run inside Safehouse only on a host with the launch wrapper.
-Otherwise Safehouse refuses them. Disable automatic Safehouse to run them unsandboxed.
-On a host without the plugin requirement, if the Safehouse plugin is disabled, removed or crashes, the next open of such an agent starts it unsandboxed, and Paseo shows no error.
+On a host without the plugin requirement, they also need **Experimental: sandbox plugin-supplied providers** in the Safehouse panel, which is Off by default.
+With it On, if the Safehouse plugin is disabled, removed or crashes, the next open of such an agent starts it unsandboxed, and Paseo shows no error.
+When Safehouse cannot run such a provider, the Paseo 0.16 composer shows the reason and starts the agent with Safehouse Off. Other callers get a creation error.
 Keep daemon access Off for these agents. The [design](docs/design.md#plugin-supplied-providers) lists the limits of this route.
 
 ## Access limits

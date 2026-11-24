@@ -85,3 +85,38 @@ External services and proxy routes retain their separate authority.
 When an account-switching plugin selects a Claude or Codex account home at least two levels below the daemon home, a new Safehouse session can read and write only that home, even with daemon access Off. Links in the account home do not reach other daemon files. After an update, select **Refresh providers**.
 
 One new agent can get daemon access without changing the workspace setting: create it with the label `paseo-safehouse.paseo-access=daemon`, for example `paseo run --label paseo-safehouse.paseo-access=daemon`. The choice is fixed at creation; later label or metadata changes do not change it, and the agent's workers do not inherit it. Daemon access includes the native Paseo tools as described above. `browser_upload` can pass the browser a host file through a workspace symlink.
+
+## Experimental: plugin-supplied providers
+
+Paseo plugins can supply their own providers, for example Antigravity.
+Safehouse cannot make a Safehouse version of these providers.
+On a Paseo host with a per-session launch wrapper, Safehouse can wrap each session of such a provider when the session opens.
+
+This route has a limitation.
+Current Paseo hosts cannot require Safehouse to stay active for a wrapped agent.
+If the Safehouse plugin is disabled, removed or fails, the next open of a wrapped agent starts its provider without Safehouse.
+Paseo shows no error when this occurs.
+
+For this reason, the route is Off by default. To use it:
+
+1. Open the **Safehouse** panel.
+2. Read the limitation under **Experimental: sandbox plugin-supplied providers**.
+3. Select **Turn on experimental wrap**.
+
+The setting applies to new agents on this daemon.
+Agents created while it was On keep the wrap when you turn it Off.
+Keep **Allow Paseo daemon access** Off for wrapped agents. Paseo's host terminal tools run outside the wrap.
+
+While the setting is Off, Safehouse does not wrap these providers.
+On Paseo 0.16 and later, the Safehouse choice in the composer shows Off, and On is not available.
+Its tooltip shows "Safehouse unavailable for" the provider and the reason before you send.
+In the narrow layout, the Safehouse row in the Features sheet shows the same text and Off.
+The agent then starts without Safehouse.
+Other callers, such as the Paseo 0.15 workspace header, get a creation error. On a host with the launch wrapper, the error names the setting.
+On a host without the launch wrapper, such as Paseo 0.17.1, Safehouse cannot run these providers, and the composer shows that reason.
+The panel then shows that the setting needs a Paseo version with the launch wrapper, and does not offer **Turn on experimental wrap**.
+
+A stricter guarantee needs changes in Paseo itself (`plugin-required-active`).
+With that change, Paseo would refuse to open a wrapped agent while Safehouse is inactive.
+Safehouse will set that requirement on each wrapped agent when Paseo provides it.
+Until then, this route stays experimental.

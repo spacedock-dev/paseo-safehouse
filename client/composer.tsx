@@ -2,13 +2,15 @@ import { useEffect, useLayoutEffect, useState, type ComponentType } from "react"
 import { Pressable, Text, View } from "react-native";
 import * as sdk from "@getpaseo/plugin/client";
 import * as ui from "@getpaseo/plugin/client/ui";
-import { availabilityRpc, installationUrl, launchMetadataKey, sessionMetadataKey, sessionLabel, statusRpc } from "../shared/contracts";
+import {
+  availabilityRpc, draftPlan, installationUrl, launchMetadataKey, launchUnavailableKey, sessionMetadataKey, sessionLabel, statusRpc,
+} from "../shared/contracts";
 
 type Choice = "on" | "off";
 export type Composer = {
   context: "agent" | "draft" | "new-workspace";
   agent: { provider: string | null; metadata: Readonly<Record<string, unknown>> };
-  setMetadata(patch: Record<string, boolean | null>): Promise<void>;
+  setMetadata(patch: Record<string, boolean | string | null>): Promise<void>;
 };
 type SelectProps = {
   title: string; icon: "Lock"; value: Choice; disabled?: boolean;
@@ -53,7 +55,17 @@ export function SafehouseComposer({ theme, onReady, openDetails }: {
   const [error, setError] = useState("");
   const [initializationError, setInitializationError] = useState("");
   const [retry, setRetry] = useState(0);
+  const [planTried, setPlanTried] = useState("");
+  const [planFailure, setPlanFailure] = useState<{ signature: string; message: string } | null>(null);
   const launchValue = composer.agent.metadata[launchMetadataKey];
+  const provider = composer.agent.provider ?? "";
+  const owned = availability?.ownedProviderIds ?? [];
+  const unavailableReasons = availability?.unavailable ?? {};
+  const reason = composer.context !== "agent" && Object.hasOwn(unavailableReasons, provider) ? unavailableReasons[provider] : undefined;
+  const plan = composer.context === "agent" || !availability ? null
+    : draftPlan({ provider: composer.agent.provider, metadata: composer.agent.metadata, owned, unavailable: unavailableReasons });
+  // One attempt per plan: a rejected write is not retried until the provider, launch value or reason changes.
+  const planSignature = plan ? JSON.stringify([composer.context, provider, launchValue, composer.agent.metadata[launchUnavailableKey] ?? null, reason ?? null]) : "";
   useLayoutEffect(() => {
     if (composer.context === "agent" || typeof launchValue === "boolean") return;
     if (Object.hasOwn(composer.agent.metadata, launchMetadataKey)) {
@@ -86,6 +98,15 @@ export function SafehouseComposer({ theme, onReady, openDetails }: {
     return () => { active = false; clearInterval(timer); };
   }, [readAvailability, readStatus, target]);
   useEffect(() => readyId ? onReady(readyId) : undefined, [readyId, onReady]);
+  useEffect(() => {
+    if (!plan || planTried === planSignature) return;
+    setPlanTried(planSignature);
+    let active = true;
+    composer.setMetadata(plan).catch((e) => {
+      if (active) setPlanFailure({ signature: planSignature, message: e instanceof Error ? e.message : String(e) });
+    });
+    return () => { active = false; };
+  }, [planSignature]);
   if (composer.context === "agent") {
     if (!readyId) return null;
     const title = `${session!.label}. Open Safehouse details`;
@@ -96,20 +117,24 @@ export function SafehouseComposer({ theme, onReady, openDetails }: {
       <ui.Icon name="Lock" size={16} color={theme.colors.foregroundMuted} />
     </Pressable>;
   }
-  const owned = availability?.ownedProviderIds ?? [];
-  const fixed = owned.includes(composer.agent.provider ?? "");
-  const choice = typeof launchValue === "boolean" ? draftChoice(composer, owned) : undefined;
+  const fixed = owned.includes(provider);
+  // With a reason, only an Off that is already written is shown; On cannot be chosen.
+  const choice = typeof launchValue === "boolean" && !(reason && launchValue) ? draftChoice(composer, owned) : undefined;
+  const failure = initializationError || (planSignature && planFailure?.signature === planSignature ? planFailure.message : "");
+  const reasonTitle = reason ? `Safehouse unavailable for ${provider} · ${reason}` : "";
   const unavailable = availability && availability.availability !== "available";
   const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
-  return <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-    {choice ? <Select title={fixed ? "Safehouse On · explicit provider" : "Safehouse"} icon="Lock"
-      value={choice} disabled={!availability || fixed}
+  // A fragment, not a wrapper view: the host lays out each node, so the toolbar item stays as narrow as the
+  // control and a sheet row gets the full width, where a long title truncates and the value stays visible.
+  return <>
+    {choice ? <Select title={reasonTitle || (fixed ? "Safehouse On · explicit provider" : "Safehouse")} icon="Lock"
+      value={choice} disabled={!availability || fixed || !!reason}
       options={[
-        { value: "on", label: "On", description: "Run this new agent inside Safehouse." },
-        { value: "off", label: "Off", description: "Run this new agent without Safehouse." },
+        { value: "on", label: "On", description: reason ? `Unavailable: ${reason}` : "Run this new agent inside Safehouse." },
+        { value: "off", label: "Off", description: `Run this new agent without Safehouse.${reasonTitle ? ` ${reasonTitle}.` : ""}` },
       ]} onValueChange={({ value }) => setDraftChoice(composer, owned, value)} /> :
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <Text style={muted}>{initializationError ? `Safehouse choice failed: ${initializationError}` : "Safehouse checking"}</Text>
+        <Text style={muted}>{failure ? `Safehouse choice failed: ${failure}` : "Safehouse checking"}</Text>
         {initializationError ? <Pressable accessibilityRole="button" onPress={() => setRetry(retry + 1)}>
           <Text style={muted}>Retry Safehouse choice</Text>
         </Pressable> : null}
@@ -120,5 +145,5 @@ export function SafehouseComposer({ theme, onReady, openDetails }: {
       </Pressable>
       <Pressable accessibilityRole="button" onPress={() => void refresh()}><Text style={muted}>Check again</Text></Pressable>
     </> : null}
-  </View>;
+  </>;
 }

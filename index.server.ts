@@ -3,6 +3,7 @@ import {
   statusRpc,
   availabilityRpc,
   daemonAccessRpc,
+  experimentalWrapRpc,
   routingRpc,
   setupRpc,
   previewRpc,
@@ -13,6 +14,7 @@ import {
   status,
   composerAvailability,
   setDaemonAccess,
+  setExperimentalWrap,
   setWorkspaceRouting,
   setup,
   preview,
@@ -34,6 +36,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(daemonAccessRpc, ({ workspaceId, enabled, revision }, { paseo }) =>
     setDaemonAccess(paseo, workspaceId, enabled, revision),
   );
+  server.handle(experimentalWrapRpc, ({ enabled }) => setExperimentalWrap(enabled));
   server.handle(setupRpc, (input, { paseo }) => setup(paseo, input));
   server.handle(previewRpc, async ({ workspaceId, raw }, { paseo }) =>
     preview(paseo, await workspaceCwd(paseo, workspaceId), raw),

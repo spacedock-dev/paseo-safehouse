@@ -22,6 +22,12 @@ export const launchError = (id: string, reason: string) => Object.assign(new Err
 export const unsupportedError = (id: string) => Object.assign(new Error(
   `${id} is not supported by Safehouse yet; disable automatic Safehouse to run it unsandboxed.`,
 ), { name: "SafehouseLaunchError" });
+export const optInError = (id: string) => Object.assign(new Error(
+  `Safehouse provider ${id}: this Paseo host cannot keep Safehouse required for this agent, so after the Safehouse plugin is disabled, removed or fails, a later open would start it without Safehouse. To accept this, turn on "Experimental: sandbox plugin-supplied providers" in the Safehouse panel. Otherwise start it with Safehouse Off.`,
+), { name: "SafehouseLaunchError" });
+export const experimentalWrapError = () => Object.assign(new Error(
+  "The Safehouse experimental wrap setting is unreadable or invalid. Choose the setting again in the Safehouse panel.",
+), { name: "SafehouseLaunchError" });
 /** The base factory a safehouse-<id> entry can extend, or null when the public configuration cannot derive one. */
 export function derivedBase(id: string, providers: Providers) {
   const config = (providers[id] ?? {}) as ProviderConfig;
@@ -43,19 +49,22 @@ export const wrapGrants: Record<string, { readWrite?: string[]; readOnly?: strin
   antigravity: { readWrite: [".gemini/antigravity-cli"], readOnly: [".gemini/config"], enable: ["keychain"] },
 };
 /**
- * Host support for the launch-wrap hook, read from the static provider snapshot entry.
- * A host without the hook has no `launchWrap` field or no snapshot call. A failed read counts as no support.
+ * The host's provider snapshot entries, with host support for the launch-wrap hook.
+ * A host without the hook has no `launchWrap` field or no snapshot call. A failed read gives no entries.
  */
-export async function launchWrapProviders(paseo: Paseo, cwd?: string) {
+export async function providerSnapshot(paseo: Paseo, cwd?: string) {
   const providers = paseo.providers as unknown as {
     snapshot?: (options?: { cwd?: string }) => Promise<{ entries?: { provider?: unknown; launchWrap?: unknown }[] }>;
   } | undefined;
-  if (typeof providers?.snapshot !== "function") return new Set<string>();
+  if (typeof providers?.snapshot !== "function") return [];
   try {
     const { entries } = await providers.snapshot(cwd ? { cwd } : undefined);
-    return new Set(Array.isArray(entries) ? entries.flatMap((entry) =>
-      typeof entry?.provider === "string" && entry.launchWrap === true ? [entry.provider] : []) : []);
-  } catch { return new Set<string>(); }
+    return Array.isArray(entries) ? entries.flatMap((entry) =>
+      typeof entry?.provider === "string" ? [{ provider: entry.provider, launchWrap: entry.launchWrap === true }] : []) : [];
+  } catch { return []; }
+}
+export async function launchWrapProviders(paseo: Paseo, cwd?: string) {
+  return new Set((await providerSnapshot(paseo, cwd)).flatMap((entry) => entry.launchWrap ? [entry.provider] : []));
 }
 export async function launchWrapSupported(paseo: Paseo, id: string, cwd: string) {
   return (await launchWrapProviders(paseo, cwd)).has(id);

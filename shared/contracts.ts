@@ -11,6 +11,8 @@ export const availabilityRpc = defineRpc({
   output: availabilitySchema.extend({
     composerMetadataSupported: z.boolean(),
     ownedProviderIds: z.array(z.string()),
+    // Providers that creation of an On draft refuses, with the reason.
+    unavailable: z.record(z.string(), z.string()),
   }),
 });
 // Only the creation open reads this label or metadata key; a per-agent record decides later opens.
@@ -38,6 +40,10 @@ export const statusRpc = defineRpc({
     policyValid: z.boolean(),
     error: z.string().nullable(),
     unavailable: z.record(z.string(), z.string()),
+    // The per-daemon experimental wrap setting; null when its file is invalid.
+    experimentalWrap: z.boolean().nullable(),
+    // Whether any provider on this host has Paseo's per-session launch wrapper; the setting has no effect without one.
+    launchWrapHost: z.boolean(),
     features: z.array(z.string()),
     agents: z.array(
       z.object({
@@ -56,6 +62,11 @@ export const statusRpc = defineRpc({
 export const routingRpc = defineRpc({
   name: "safehouse.set-workspace-routing",
   input: workspace.extend({ enabled: z.boolean() }),
+  output: z.object({ enabled: z.boolean() }),
+});
+export const experimentalWrapRpc = defineRpc({
+  name: "safehouse.set-experimental-wrap",
+  input: z.object({ enabled: z.boolean() }),
   output: z.object({ enabled: z.boolean() }),
 });
 export const daemonAccessRpc = defineRpc({
@@ -114,6 +125,23 @@ export function launchChoice(metadata?: Record<string, unknown>): boolean | unde
   if (typeof value !== "boolean")
     throw new Error("paseo-safehouse.launch must be a boolean. Choose On or Off and retry.");
   return value;
+}
+
+// Marks an Off that Safehouse wrote because the draft's provider is unavailable, so that Off can be undone.
+// The server ignores it; a user's own Off never carries it.
+export const launchUnavailableKey = "paseo-safehouse.launch-unavailable";
+/** The metadata patch that keeps a draft's choice consistent with the provider reasons, or null for none. */
+export function draftPlan({ provider, metadata, owned, unavailable }: {
+  provider: string | null; metadata: Readonly<Record<string, unknown>>; owned: readonly string[]; unavailable: Record<string, string>;
+}): Record<string, boolean | string | null> | null {
+  const id = provider ?? "", launch = metadata[launchMetadataKey], marked = Object.hasOwn(metadata, launchUnavailableKey);
+  if (owned.includes(id) || typeof launch !== "boolean") return null;
+  if (id && Object.hasOwn(unavailable, id)) {
+    if (launch) return { [launchMetadataKey]: false, [launchUnavailableKey]: id };
+    return marked && metadata[launchUnavailableKey] !== id ? { [launchUnavailableKey]: id } : null;
+  }
+  if (!marked) return null;
+  return launch ? { [launchUnavailableKey]: null } : { [launchMetadataKey]: true, [launchUnavailableKey]: null };
 }
 
 // A mutable UI locator, never launch authority or evidence of sandbox entry.
