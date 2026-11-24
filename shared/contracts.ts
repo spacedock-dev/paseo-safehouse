@@ -42,6 +42,8 @@ export const statusRpc = defineRpc({
     unavailable: z.record(z.string(), z.string()),
     // The per-daemon experimental wrap setting; null when its file is invalid.
     experimentalWrap: z.boolean().nullable(),
+    // Whether any provider on this host has Paseo's per-session launch wrapper; the setting has no effect without one.
+    launchWrapHost: z.boolean(),
     features: z.array(z.string()),
     agents: z.array(
       z.object({

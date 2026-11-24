@@ -124,12 +124,14 @@ export function SafehouseComposer({ theme, onReady, openDetails }: {
   const reasonTitle = reason ? `Safehouse unavailable for ${provider} · ${reason}` : "";
   const unavailable = availability && availability.availability !== "available";
   const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
-  return <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+  // A fragment, not a wrapper view: the host lays out each node, so the toolbar item stays as narrow as the
+  // control and a sheet row gets the full width, where a long title truncates and the value stays visible.
+  return <>
     {choice ? <Select title={reasonTitle || (fixed ? "Safehouse On · explicit provider" : "Safehouse")} icon="Lock"
       value={choice} disabled={!availability || fixed || !!reason}
       options={[
         { value: "on", label: "On", description: reason ? `Unavailable: ${reason}` : "Run this new agent inside Safehouse." },
-        { value: "off", label: "Off", description: "Run this new agent without Safehouse." },
+        { value: "off", label: "Off", description: `Run this new agent without Safehouse.${reasonTitle ? ` ${reasonTitle}.` : ""}` },
       ]} onValueChange={({ value }) => setDraftChoice(composer, owned, value)} /> :
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Text style={muted}>{failure ? `Safehouse choice failed: ${failure}` : "Safehouse checking"}</Text>
@@ -137,12 +139,11 @@ export function SafehouseComposer({ theme, onReady, openDetails }: {
           <Text style={muted}>Retry Safehouse choice</Text>
         </Pressable> : null}
       </View>}
-    {reasonTitle ? <Text style={muted}>{reasonTitle}</Text> : null}
     {unavailable || error ? <>
       <Pressable accessibilityRole="link" onPress={() => sdk.openExternalUrl(installationUrl)}>
         <Text style={muted}>{error ? "Safehouse check failed" : "Safehouse unavailable"} · Install on daemon Mac</Text>
       </Pressable>
       <Pressable accessibilityRole="button" onPress={() => void refresh()}><Text style={muted}>Check again</Text></Pressable>
     </> : null}
-  </View>;
+  </>;
 }

@@ -147,7 +147,7 @@ test("real 0.15 compiler loads old/new SDK exports and keeps composer/header exc
       assert.equal(control.props.options[1].description, `Run this new agent without Safehouse. ${title}.`);
       // The control is the item's only node: no beside text widens the toolbar item, and no wrapper sizes the sheet row.
       assert.equal(forced.type, "fragment", "no wrapper view around the control");
-      assert.deepEqual(forced.props.children.filter(Boolean), [control], "no text beside the control");
+      assert.deepEqual(Array.from(forced.props.children).filter(Boolean), [control], "no text beside the control");
       const forcedWrites = writes; await planned(); assert.equal(writes, forcedWrites, "a forced Off is written once");
       composer.agent.provider = "pi"; await planned();
       assert.equal(metadata["paseo-safehouse.launch"], true); assert.equal("paseo-safehouse.launch-unavailable" in metadata, false);

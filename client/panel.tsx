@@ -244,7 +244,8 @@ export function SafehousePanel({
             <Text style={text}>Experimental: sandbox plugin-supplied providers (for example Antigravity)</Text>
             <Text style={muted}>This Paseo host cannot require Safehouse to stay active for these agents. If the Safehouse plugin is disabled, removed or fails, the next open of such an agent starts it without Safehouse, and Paseo shows no error. A stricter guarantee needs upstream Paseo changes (plugin-required-active).</Text>
             <Text style={muted}>Saved: {data.experimentalWrap === null ? "unreadable or invalid; choose again" : data.experimentalWrap ? "On" : "Off"}. Applies to new agents on this daemon. Existing agents keep their route.</Text>
-            {[true, false].filter((enabled) => data.experimentalWrap !== enabled).map((enabled) => (
+            {data.launchWrapHost ? null : <Text style={muted}>This setting needs a Paseo version with the launch wrapper.</Text>}
+            {[true, false].filter((enabled) => data.experimentalWrap !== enabled && (data.launchWrapHost || !enabled)).map((enabled) => (
               <View key={String(enabled)}>
                 {button(enabled ? "Turn on experimental wrap" : "Turn off experimental wrap",
                   () => void action(async () => { await setExperimentalWrap({ enabled }); }))}

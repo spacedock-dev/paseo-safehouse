@@ -771,6 +771,7 @@ export async function status(paseo: Paseo, workspaceId: string) {
     error: routingError ?? error,
     unavailable: await unavailableProviders(paseo, saved),
     experimentalWrap: await experimentalWrap(),
+    launchWrapHost: (await launchWrapProviders(paseo)).size > 0,
     features: saved?.features ?? [],
     agents,
   };
