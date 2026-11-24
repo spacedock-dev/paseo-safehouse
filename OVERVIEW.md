@@ -108,10 +108,13 @@ Agents created while it was On keep the wrap when you turn it Off.
 Keep **Allow Paseo daemon access** Off for wrapped agents. Paseo's host terminal tools run outside the wrap.
 
 While the setting is Off, Safehouse does not wrap these providers.
-On Paseo 0.16 and later, the composer shows "Safehouse unavailable for" the provider and the reason before you send.
-The choice shows Off, and On is not available. The agent then starts without Safehouse.
+On Paseo 0.16 and later, the Safehouse choice in the composer shows Off, and On is not available.
+Its tooltip shows "Safehouse unavailable for" the provider and the reason before you send.
+In the narrow layout, the Safehouse row in the Features sheet shows the same text and Off.
+The agent then starts without Safehouse.
 Other callers, such as the Paseo 0.15 workspace header, get a creation error. On a host with the launch wrapper, the error names the setting.
 On a host without the launch wrapper, such as Paseo 0.17.1, Safehouse cannot run these providers, and the composer shows that reason.
+The panel then shows that the setting needs a Paseo version with the launch wrapper, and does not offer **Turn on experimental wrap**.
 
 A stricter guarantee needs changes in Paseo itself (`plugin-required-active`).
 With that change, Paseo would refuse to open a wrapped agent while Safehouse is inactive.

@@ -79,7 +79,11 @@ On a host with the launch wrapper and without the plugin requirement, with **Exp
 2. An Antigravity draft on Paseo 0.16 or later shows "Safehouse unavailable for antigravity" with the opt-in reason and Off, with On not available. It sends without a creation error and starts without Safehouse.
 3. A create without a composer choice is refused with the error that names the setting.
 
-On a Paseo 0.16 or later host without the launch wrapper, for example Paseo 0.17.1, an Antigravity draft shows "Safehouse unavailable for antigravity · this Paseo host cannot wrap it" with Off, inline and in the narrow-layout sheet. Switching the draft to Claude shows On, and the Claude agent runs in Safehouse.
+On a Paseo 0.16 or later host without the launch wrapper, for example Paseo 0.17.1:
+1. An Antigravity draft at about 1200 px shows a disabled Off control inline in the composer row. Its tooltip reads "Safehouse unavailable for antigravity · this Paseo host cannot wrap it".
+2. In the narrow-layout Features sheet, the Safehouse row shows that text, truncated if needed, and Off inside the row.
+3. The draft sends without a creation error. Switching the draft to Claude shows On, and the Claude agent runs in Safehouse.
+4. The panel shows "This setting needs a Paseo version with the launch wrapper." and no **Turn on experimental wrap** button.
 
 On a host with the launch wrapper, with the setting On, an Antigravity agent must:
 1. Run `agy` under the Safehouse wrap, with the provider, executable and guard profiles, and complete a turn.
@@ -88,7 +92,7 @@ On a host with the launch wrapper, with the setting On, an Antigravity agent mus
 
 Where the host also offers the plugin requirement, the agent must refuse to open with `required_plugin_inactive` after Safehouse is disabled.
 
-Offline, `test/launch-wrap.test.ts` checks route selection with each setting state, the setting file, the reason map, the route record and the launcher. `test/composer.test.ts` checks `draftPlan` and, with `PASEO_RUNTIME_MODULES`, the forced Off in the compiled composer. Set `PASEO_LAUNCH_WRAP_SERVER` to a built Paseo server with the launch wrapper to validate the open result with its schema.
+Offline, `test/launch-wrap.test.ts` checks route selection with each setting state, the setting file, the reason map, the route record and the launcher. `test/composer.test.ts` checks `draftPlan` and, with `PASEO_RUNTIME_MODULES`, the forced Off in the compiled composer and the panel's experimental block with and without the launch wrapper. Set `PASEO_LAUNCH_WRAP_SERVER` to a built Paseo server with the launch wrapper to validate the open result with its schema.
 `test/sandbox.mac.test.ts` runs the wrap launcher under the installed Safehouse.
 
 In the same file, the identity case opens a derived and a wrapped agent through the plugin and starts each launcher under the installed Safehouse with Paseo's identity overlay.

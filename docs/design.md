@@ -192,6 +192,7 @@ The experimental setting is per daemon, because the limitation belongs to the Pa
 `safehouse.set-experimental-wrap` writes `experimental-wrap.json` in the Safehouse state root as `{ "enabled": <boolean> }`. A missing file is Off. Any other content is invalid.
 The guard profile denies the state root to every Safehouse process, so a sandboxed agent cannot change the setting.
 `safehouse.status` reports it as `experimentalWrap`, `null` when invalid. The panel shows the limitation above the button that changes it.
+`safehouse.status` also reports `launchWrapHost`, true when any snapshot provider has `launchWrap: true`. Without it, the setting has no effect, so the panel shows "This setting needs a Paseo version with the launch wrapper." and no **Turn on experimental wrap** button. A saved On still offers **Turn off experimental wrap**.
 Only creation reads the setting. Opens and derived routes never read it, so an agent created while it was On keeps its route record and its wrap after it is turned Off.
 
 `unavailableProviders` in `server/service.ts` builds one map from provider ID to reason. `safehouse.status` and `safehouse.availability` both return it as `unavailable`.
@@ -202,7 +203,8 @@ The map has no create request, so it treats the host as lacking the plugin requi
 On Paseo 0.16 and later, the draft composer reads this map from `safehouse.availability`.
 `draftPlan` in `shared/contracts.ts` writes Off for a draft whose provider has a reason, with the key `paseo-safehouse.launch-unavailable` set to that provider.
 The key marks an Off that Safehouse wrote. When the draft moves to a provider without a reason, or the reason ends, `draftPlan` restores On and removes the key. A user's own Off has no key and is never changed.
-The host `Select` has no per-option disable, so the control shows Off, disabled, with the title `Safehouse unavailable for <provider> · <reason>`. The same text appears beside it.
+The host `Select` has no per-option disable, so the control shows Off, disabled, with the title `Safehouse unavailable for <provider> · <reason>`. The Off option description repeats it.
+The title is the inline tooltip and the row label in the Features sheet. The composer item renders the control alone, with no wrapper view or text beside it. The toolbar item is then as narrow as the control, and stays inline wherever an enabled On or Off would. A sheet row gets the full width, so a long title truncates and Off stays visible.
 A rejected write shows the choice failure and is not retried until the provider, launch value or reason changes.
 The draft sends with Off and starts without Safehouse. The server ignores the key. The Paseo 0.15 header and other callers get the creation refusal.
 
