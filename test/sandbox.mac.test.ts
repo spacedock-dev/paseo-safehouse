@@ -559,3 +559,119 @@ r.other=Object.keys(process.env).filter(k=>/^(PASEO_|SAFEHOUSE_)/.test(k)&&!n.in
   for (const [label, result] of Object.entries(results)) t.diagnostic(`${label}: ${JSON.stringify(result)}`);
   assert.deepEqual(results, expected);
 });
+
+test("a linked worktree workspace gets Safehouse's own git access on both routes, and forged git links widen no later launch", { skip: process.platform !== "darwin" }, async (t) => {
+  const binary = await findExecutable("safehouse"), gitBinary = await findExecutable("git");
+  assert.ok(binary, "Safehouse must be installed");
+  assert.ok(gitBinary, "git must be installed");
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.homedir(), ".safehouse-test-")));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const [main, wt, sibling, other, otherWt, outside, root] =
+    ["main", "wt", "sibling", "other", "other-wt", "outside", "state"].map((name) => path.join(base, name));
+  for (const dir of [main, other, outside, path.join(root, "snapshots")]) await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(outside, "canary"), "fixture");
+  // Fixture repositories use a fixed identity and ignore the host's git configuration.
+  const flags = ["-c", "user.name=Safehouse Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"];
+  const git = (cwd: string, ...args: string[]) => run(gitBinary, [...flags, ...args],
+    { cwd, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+  for (const [repo, worktrees] of [[main, [wt, sibling]], [other, [otherWt]]] as const) {
+    await git(repo, "init", "-q", "-b", "main");
+    await fs.writeFile(path.join(repo, "canary"), "fixture\n");
+    await git(repo, "add", "canary");
+    await git(repo, "commit", "-qm", "init");
+    for (const dir of worktrees) await git(repo, "worktree", "add", "-q", "-b", path.basename(dir), dir);
+  }
+  const common = path.join(main, ".git"), q = JSON.stringify;
+  const guard = path.join(root, "guard.sb"), bootstrap = path.join(root, "launch.sh"), wrap = path.join(root, "wrap.sh");
+  await fs.writeFile(guard, guardProfile([root], [], []));
+  await fs.writeFile(bootstrap, renderBootstrap({ root, binary, guard, executable: process.execPath, host: "claude" }));
+  await fs.writeFile(wrap, renderWrapLauncher({ root, binary, guard, features: [] }));
+  const prepared = async (cwd: string) => prepareSnapshot(root, await loadPolicy(cwd, []));
+  const launch = async (route: string, snapshot: string, body: string, cwd = wt) => JSON.parse((await run("/bin/sh",
+    [...(route === "bootstrap" ? [bootstrap] : [wrap, "PASEO_HOME", "", "", process.execPath]), "-e",
+      `const fs=require('node:fs'),cp=require('node:child_process');const r={};
+const a=(k,f)=>{try{r[k]=f()??'allowed'}catch(e){r[k]=e.status??e.code}};
+const git=(...args)=>cp.execFileSync(${q(gitBinary)},${q(flags)}.concat(args),{stdio:'pipe'}).toString();
+${body};console.log(JSON.stringify(r));`],
+    { cwd, env: policyEnvironment(process.env, snapshot), timeout: 45000 })).stdout);
+  await t.test("git status, diff and commit work under both launchers, and nothing else is granted", async () => {
+    for (const route of ["bootstrap", "wrap"]) {
+      const result = await launch(route, await prepared(wt), `fs.writeFileSync('canary','changed by ${route}\\n');
+a('status',()=>(git('status'),0));a('diff',()=>git('diff').includes('changed by ${route}'));a('commit',()=>(git('commit','-qam','${route}'),0));
+a('mainWrite',()=>fs.writeFileSync(${q(path.join(main, "written"))},'x'));a('siblingWrite',()=>fs.writeFileSync(${q(path.join(sibling, "written"))},'x'));
+a('siblingRead',()=>fs.readFileSync(${q(path.join(sibling, "canary"))},'utf8'));a('outside',()=>fs.readFileSync(${q(path.join(outside, "canary"))},'utf8'))`);
+      t.diagnostic(`${route}: ${q(result)}`);
+      assert.deepEqual(result, { status: 0, diff: true, commit: 0, mainWrite: "EPERM", siblingWrite: "EPERM", siblingRead: "fixture\n", outside: "EPERM" });
+      assert.equal((await git(wt, "log", "-1", "--format=%s")).stdout.trim(), route);
+    }
+    // A read-only common dir must fail the same commit check.
+    const readOnly = await prepared(wt), file = path.join(readOnly, ".safehouse");
+    await fs.writeFile(file, (await fs.readFile(file, "utf8")).replace(`add-dirs=${common}\n`, `add-dirs-ro=${common}\n`));
+    assert.notEqual((await launch("bootstrap", readOnly, `fs.writeFileSync('canary','control\\n');a('commit',()=>(git('commit','-qam','control'),0))`)).commit, 0);
+    await git(wt, "checkout", "--", "canary");
+  });
+  await t.test("the snapshot's rules for fixture paths equal Safehouse's own for a linked worktree and a main checkout", async () => {
+    const clean = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(SAFEHOUSE_|PASEO_)/.test(name))) as Record<string, string>;
+    const rules = async (cwd: string, args: string[], env: Record<string, string>) => {
+      const { stdout } = await run(binary, [...args, "--stdout"], { cwd, env, maxBuffer: 16 * 1024 * 1024 });
+      const found = new Set<string>();
+      // Top-level forms start a line. Collect each fixture path an allow rule names, except the snapshot itself.
+      for (const form of stdout.replace(/;[^\n]*/g, "").split(/\n(?=\()/)) {
+        const ops = /^\(allow ([^(]*)/.exec(form)?.[1].trim().replace(/\s+/g, " ");
+        for (const [, kind, file] of ops ? form.matchAll(/\((literal|subpath) "([^"]*)"\)/g) : [])
+          if ((file + "/").startsWith(base + "/") && !(file + "/").startsWith(root + "/")) found.add(`${ops} ${kind} ${file}`);
+      }
+      return [...found].sort();
+    };
+    for (const cwd of [wt, main]) {
+      const plugin = await rules(cwd, ["--trust-workdir-config", "--append-profile", guard], policyEnvironment(process.env, await prepared(cwd)));
+      assert.deepEqual(plugin, await rules(cwd, ["--workdir", cwd], clean), cwd);
+      assert.ok(plugin.some((rule) => rule.includes(sibling)), "the comparison sees worktree grants");
+    }
+  });
+  await t.test("forged git links in one launch grant nothing in the next", async () => {
+    const marker = path.join(wt, ".git"), original = await fs.readFile(marker, "utf8");
+    const otherAdmin = (await fs.readFile(path.join(otherWt, ".git"), "utf8")).replace(/^gitdir: /, "").trim();
+    const staged = path.join(wt, "staged"), evil = path.join(common, "worktrees", "evil");
+    const forgeries = {
+      // Check 1: the admin dir must lie in the common dir it names.
+      staged: `a('admin',()=>{fs.mkdirSync(${q(staged)});fs.writeFileSync(${q(path.join(staged, "HEAD"))},'ref: refs/heads/wt\\n');
+fs.writeFileSync(${q(path.join(staged, "gitdir"))},${q(marker + "\n")});fs.writeFileSync(${q(path.join(staged, "commondir"))},${q(path.join(other, ".git") + "\n")})});
+a('marker',()=>fs.writeFileSync('.git',${q(`gitdir: ${staged}\n`)}))`,
+      // Check 2: the admin dir must name this workspace.
+      foreignAdmin: `a('marker',()=>fs.writeFileSync('.git',${q(`gitdir: ${otherAdmin}\n`)}))`,
+      // Check 3: a listed worktree must name its own admin dir.
+      addedEntry: `a('entry',()=>{fs.mkdirSync(${q(evil)});fs.writeFileSync(${q(path.join(evil, "gitdir"))},${q(path.join(other, ".git") + "\n")})})`,
+    };
+    const results: Record<string, unknown> = {}, expected: Record<string, unknown> = {};
+    for (const [name, forgery] of Object.entries(forgeries)) {
+      const forged = await launch("bootstrap", await prepared(wt), forgery);
+      const next = await prepared(wt);
+      const probe = await launch("wrap", next, `a('read',()=>fs.readFileSync(${q(path.join(other, "canary"))},'utf8'));a('readWorktree',()=>fs.readFileSync(${q(path.join(otherWt, "canary"))},'utf8'));a('write',()=>fs.writeFileSync(${q(path.join(other, "canary"))},'x'))`);
+      results[name] = { forged, named: (await fs.readFile(path.join(next, ".safehouse"), "utf8")).includes(other), probe };
+      expected[name] = { forged: Object.fromEntries(Object.keys(forged).map((key) => [key, "allowed"])), named: false, probe: { read: "EPERM", readWorktree: "EPERM", write: "EPERM" } };
+      await fs.writeFile(marker, original);
+      for (const dir of [staged, evil]) await fs.rm(dir, { recursive: true, force: true });
+    }
+    t.diagnostic(q(results));
+    assert.deepEqual(results, expected);
+  });
+  await t.test("a workspace in a folder named worktrees cannot make itself the admin dir of its grandparent", async () => {
+    // Claude Code's `<repo>/.claude/worktrees/<name>` and a user's `~/worktrees/<name>`.
+    const layouts = { claude: path.join(main, ".claude", "worktrees", "cc"), home: path.join(base, "home", "worktrees", "hw") };
+    const results: Record<string, unknown> = {}, expected: Record<string, unknown> = {};
+    for (const [name, workspace] of Object.entries(layouts)) {
+      await git(main, "worktree", "add", "-q", "--detach", workspace);
+      const grandparent = path.dirname(path.dirname(workspace)), target = path.join(grandparent, "settings.json");
+      const forged = await launch("bootstrap", await prepared(workspace), `a('HEAD',()=>fs.writeFileSync('HEAD','ref: refs/heads/main\\n'));
+a('commondir',()=>fs.writeFileSync('commondir','../..\\n'));a('gitdir',()=>fs.writeFileSync('gitdir',${q(path.join(workspace, ".git") + "\n")}));
+a('marker',()=>fs.writeFileSync('.git','gitdir: .\\n'))`, workspace);
+      const next = await prepared(workspace);
+      const probe = await launch("wrap", next, `a('write',()=>fs.writeFileSync(${q(target)},'x'))`, workspace);
+      results[name] = { forged, named: (await fs.readFile(path.join(next, ".safehouse"), "utf8")).includes(`add-dirs=${grandparent}\n`), probe };
+      expected[name] = { forged: { HEAD: "allowed", commondir: "allowed", gitdir: "allowed", marker: "allowed" }, named: false, probe: { write: "EPERM" } };
+    }
+    t.diagnostic(q(results));
+    assert.deepEqual(results, expected);
+  });
+});
