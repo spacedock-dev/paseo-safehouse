@@ -153,7 +153,7 @@ test("real 0.15 compiler loads old/new SDK exports and keeps composer/header exc
       // A rejected write shows the failure, claims no choice, and is not retried for the same draft state.
       composer.agent.provider = "antigravity"; rejectWrite = true; await planned();
       assert.equal(metadata["paseo-safehouse.launch"], true);
-      assert.notEqual(select().type, Select); assert.match(select().props.children[0].props.children, /Safehouse choice failed: Metadata rejected/);
+      assert.notEqual(select().type, Select); assert.match(select().props.children[0].props.children, /^Safehouse choice failed: (Error: )?Metadata rejected$/);
       const failedPlan = writes; await planned(); assert.equal(writes, failedPlan, "no rejection loop");
       rejectWrite = false; composer.agent.provider = "pi"; delete metadata["paseo-safehouse.launch-unavailable"]; composerRpc = async () => available;
       // Literal receipt fixtures are independent of production label/locator helpers.

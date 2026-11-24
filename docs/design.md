@@ -175,16 +175,36 @@ Missing or malformed environment values fail before the harness starts.
 
 Paseo plugins can register providers, for example `antigravity`, `muse`, `fx`, `hoplite` and `goose`.
 These providers cannot be extended, so no `safehouse-<id>` variant exists for them.
-On a host with a per-session launch wrapper, Safehouse wraps their sessions instead.
+On a host with a per-session launch wrapper, Safehouse can wrap their sessions instead.
 With automatic Safehouse on, creation selects the first route that applies:
 
 1. **Derived route.** A provider with a derivable base uses `safehouse-<id>`, as described above. Codex always takes this route, even when its host can wrap it.
-2. **Wrap route.** The provider cannot be derived, and its `paseo.providers.snapshot()` entry has `launchWrap: true`.
-3. **Refusal.** Otherwise creation fails with the refusal text above.
+2. **Refusal by the host.** The provider's `paseo.providers.snapshot()` entry has no `launchWrap: true`. Creation fails with the refusal text above.
+3. **Wrap route with the plugin requirement.** The create request offers the plugin requirement. The experimental setting is not read.
+4. **Wrap route by the experimental setting.** Otherwise creation reads the setting. On selects the wrap route. Off refuses with: "Safehouse provider <id>: this Paseo host cannot keep Safehouse required for this agent, so after the Safehouse plugin is disabled, removed or fails, a later open would start it without Safehouse. To accept this, turn on "Experimental: sandbox plugin-supplied providers" in the Safehouse panel. Otherwise start it with Safehouse Off." An invalid setting refuses with: "The Safehouse experimental wrap setting is unreadable or invalid. Choose the setting again in the Safehouse panel."
 
+A draft or workspace choice of Off passes the request unchanged before any of these steps.
 Host support comes only from static data: the provider snapshot and the create request. A failed snapshot read counts as no support.
 **Refresh providers** applies the same rule: it lists a configured provider as unsupported only when creation would refuse it.
 Setup succeeds when the only providers on the host use the wrap route, and writes the wrap launcher.
+
+The experimental setting is per daemon, because the limitation belongs to the Paseo host and the draft composer has no workspace.
+`safehouse.set-experimental-wrap` writes `experimental-wrap.json` in the Safehouse state root as `{ "enabled": <boolean> }`. A missing file is Off. Any other content is invalid.
+The guard profile denies the state root to every Safehouse process, so a sandboxed agent cannot change the setting.
+`safehouse.status` reports it as `experimentalWrap`, `null` when invalid. The panel shows the limitation above the button that changes it.
+Only creation reads the setting. Opens and derived routes never read it, so an agent created while it was On keeps its route record and its wrap after it is turned Off.
+
+`unavailableProviders` in `server/service.ts` builds one map from provider ID to reason. `safehouse.status` and `safehouse.availability` both return it as `unavailable`.
+It contains the setup-time unsupported list, and each snapshot provider without a derived entry or a derivable base that creation of an On draft would refuse:
+`this Paseo host cannot wrap it`, `turn on Experimental: sandbox plugin-supplied providers in the Safehouse panel`, or `the experimental setting is unreadable; choose it again in the Safehouse panel`.
+The map has no create request, so it treats the host as lacking the plugin requirement. A failed read adds no computed entries, and creation stays the authority.
+
+On Paseo 0.16 and later, the draft composer reads this map from `safehouse.availability`.
+`draftPlan` in `shared/contracts.ts` writes Off for a draft whose provider has a reason, with the key `paseo-safehouse.launch-unavailable` set to that provider.
+The key marks an Off that Safehouse wrote. When the draft moves to a provider without a reason, or the reason ends, `draftPlan` restores On and removes the key. A user's own Off has no key and is never changed.
+The host `Select` has no per-option disable, so the control shows Off, disabled, with the title `Safehouse unavailable for <provider> · <reason>`. The same text appears beside it.
+A rejected write shows the choice failure and is not retried until the provider, launch value or reason changes.
+The draft sends with Off and starts without Safehouse. The server ignores the key. The Paseo 0.15 header and other callers get the creation refusal.
 
 On the wrap route, creation keeps the provider ID and configuration.
 It validates the installation, policy and daemon access record, then adds the metadata marker `paseo-safehouse.route: "wrap"`.
@@ -227,7 +247,7 @@ The wrap route has these limits:
 - **Work before the open hook is not wrapped.** This includes draft command and control discovery, and the catalog lookup during creation without a model. For Antigravity, the ACP initialize probe during creation runs unwrapped.
 - **Host operations are not wrapped.** These include usage queries, version checks and availability probes.
 - **Existing agents are never wrapped retroactively.** They have no route record and no plugin requirement.
-- **On a host without the plugin requirement, plugin loss removes the sandbox.** If the Safehouse plugin is disabled, removed or crashes, the next open of a wrapped agent starts its harness unsandboxed, and Paseo shows no error. On a host with the requirement, Paseo refuses that open instead.
+- **On a host without the plugin requirement, plugin loss removes the sandbox.** If the Safehouse plugin is disabled, removed or crashes, the next open of a wrapped agent starts its harness unsandboxed, and Paseo shows no error. For this reason, such a host uses the route only with the experimental setting. On a host with the requirement, Paseo refuses that open instead.
 - **A provider without a `wrapGrants` entry may fail to sign in.** This applies to Goose, Fx and Hoplite.
 - **There is no account-home passthrough** on the wrap route.
 

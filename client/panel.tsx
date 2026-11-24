@@ -11,6 +11,7 @@ import {
   statusRpc,
   routingRpc,
   daemonAccessRpc,
+  experimentalWrapRpc,
   setupRpc,
   previewRpc,
   saveRpc,
@@ -39,7 +40,7 @@ export function SafehousePanel({
   theme,
   layout,
 }: PluginWorkspacePanelProps) {
-  const saveDaemonAccess = useRpc(daemonAccessRpc), setRouting = useRpc(routingRpc);
+  const saveDaemonAccess = useRpc(daemonAccessRpc), setRouting = useRpc(routingRpc), setExperimentalWrap = useRpc(experimentalWrapRpc);
   const [accessDraft, setAccessDraft] = useState(false),
     [accessDirty, setAccessDirty] = useState(false),
     [accessRevision, setAccessRevision] = useState("");
@@ -189,7 +190,7 @@ export function SafehousePanel({
         services can provide access outside that sandbox.
       </Text>
       <Text style={muted}>
-        Plugin providers such as Antigravity use Safehouse only when the host can wrap their sessions. Unless the host requires this plugin, they reopen unsandboxed if Safehouse is disabled, removed or crashes. Keep daemon access Off for them. Discovery and host checks run outside the sandbox.
+        Plugin providers such as Antigravity use Safehouse only when the host can wrap their sessions. Unless the host requires this plugin, this also needs the experimental setting below. Keep daemon access Off for them. Discovery and host checks run outside the sandbox.
       </Text>
       {error || routingError ? (
         <Text
@@ -239,6 +240,15 @@ export function SafehousePanel({
             {data.availability === "available" ? <Text style={muted}>Refresh providers uses the daemon's PATH. Keep safehouse on that PATH even if the saved executable still works.</Text> : null}
             {Object.entries(data.unavailable).map(([provider, reason]) => (
               <Text key={provider} selectable style={muted}>{provider}: {reason}</Text>
+            ))}
+            <Text style={text}>Experimental: sandbox plugin-supplied providers (for example Antigravity)</Text>
+            <Text style={muted}>This Paseo host cannot require Safehouse to stay active for these agents. If the Safehouse plugin is disabled, removed or fails, the next open of such an agent starts it without Safehouse, and Paseo shows no error. A stricter guarantee needs upstream Paseo changes (plugin-required-active).</Text>
+            <Text style={muted}>Saved: {data.experimentalWrap === null ? "unreadable or invalid; choose again" : data.experimentalWrap ? "On" : "Off"}. Applies to new agents on this daemon. Existing agents keep their route.</Text>
+            {[true, false].filter((enabled) => data.experimentalWrap !== enabled).map((enabled) => (
+              <View key={String(enabled)}>
+                {button(enabled ? "Turn on experimental wrap" : "Turn off experimental wrap",
+                  () => void action(async () => { await setExperimentalWrap({ enabled }); }))}
+              </View>
             ))}
           </View>
           <View style={{ gap: 8 }}>

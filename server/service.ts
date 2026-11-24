@@ -14,7 +14,8 @@ import type { availabilitySchema } from "../shared/contracts";
 import { grantProfile, renderBootstrap, renderWrapLauncher } from "./launch";
 import { finishPending, pluginOwned, sameEntry, savePending, sameSource, serializeSetup, userOwned, validateInstallation } from "./setup";
 import {
-  configuredProvider, derivedBase, launchError, launchWrapProviders, launchWrapSupported, unsupportedError, wrapGrants, type ProviderConfig,
+  configuredProvider, derivedBase, experimentalWrapError, launchError, launchWrapProviders, launchWrapSupported, optInError, providerSnapshot,
+  unsupportedError, wrapGrants, type ProviderConfig,
 } from "./providers";
 import {
   atomicJson,
@@ -158,6 +159,20 @@ export async function setWorkspaceRouting(paseo: Paseo, workspaceId: string, ena
   return { enabled };
 }
 
+// The per-daemon opt-in for the launch-wrap route on a host that cannot keep Safehouse required. Only creation reads it.
+const experimentalWrapPath = () => path.join(stateRoot(), "experimental-wrap.json");
+/** Missing is Off. A file that is not a JSON object with a boolean `enabled` is invalid (null). */
+async function experimentalWrap(): Promise<boolean | null> {
+  try {
+    const record = JSON.parse(await fs.readFile(experimentalWrapPath(), "utf8"));
+    return typeof record?.enabled === "boolean" ? record.enabled : null;
+  } catch (e) { return (e as NodeJS.ErrnoException).code === "ENOENT" ? false : null; }
+}
+export async function setExperimentalWrap(enabled: boolean) {
+  await atomicJson(experimentalWrapPath(), { enabled });
+  return { enabled };
+}
+
 const accessPath = (cwd: string) => path.join(stateRoot(), "workspaces", `${hash(cwd)}.daemon-access.json`);
 async function daemonChoice(cwd: string) {
   let raw: string | null = null;
@@ -297,8 +312,32 @@ export async function composerAvailability(paseo: Paseo) {
     const handle = paseo.agents.ref("safehouse-capability-check") as unknown as { setMetadata?: unknown };
     composerMetadataSupported = typeof handle.setMetadata === "function";
   } catch { /* Older or unavailable host: keep the workspace header. */ }
+  const saved = await installation();
   return { ...await availability(), composerMetadataSupported,
-    ownedProviderIds: Object.keys((await installation())?.entries ?? {}) };
+    ownedProviderIds: Object.keys(saved?.entries ?? {}), unavailable: await unavailableProviders(paseo, saved) };
+}
+/**
+ * Providers that creation of an On draft refuses, with the reason: the setup-time map, and plugin-supplied
+ * providers that the host cannot wrap or that need the experimental setting. The draft has no create request,
+ * so the host counts as lacking the plugin requirement. A failed read adds no computed entries; creation decides.
+ */
+export async function unavailableProviders(paseo: Paseo, saved: Installation | null) {
+  const reasons: Record<string, string> = { ...saved?.unavailable };
+  try {
+    const entries = await providerSnapshot(paseo);
+    if (!entries.length) return reasons;
+    const providers = (await paseo.config.get()).config.providers ?? {};
+    const setting = await experimentalWrap();
+    for (const { provider, launchWrap } of entries) {
+      if (provider.startsWith("safehouse-") || saved?.entries[variant(provider)] || derivedBase(provider, providers)) continue;
+      const reason = !launchWrap ? reasons[provider] ?? "this Paseo host cannot wrap it"
+        : setting === null ? "the experimental setting is unreadable; choose it again in the Safehouse panel"
+        : setting ? undefined : "turn on Experimental: sandbox plugin-supplied providers in the Safehouse panel";
+      if (reason) reasons[provider] = reason;
+      else delete reasons[provider];
+    }
+  } catch { /* Creation remains the authority. */ }
+  return reasons;
 }
 export async function setup(
   paseo: Paseo,
@@ -512,9 +551,15 @@ export async function routeCreation(request: CreateRequest, paseo: Paseo) {
   const host = installed?.sources?.[provider]?.base ?? (selected ? native(provider) : request.config.provider);
   if (!installed?.entries[provider] || !host) {
     const providers = (await paseo.config.get()).config.providers ?? {};
-    // A provider that cannot be derived uses the launch wrap where its host reports support.
+    // A provider that cannot be derived uses the launch wrap where its host reports support. Without the
+    // plugin requirement, the wrap also needs the experimental setting.
     if (!selected && !derivedBase(request.config.provider, providers)) {
       if (!(await launchWrapSupported(paseo, request.config.provider, cwd))) throw unsupportedError(request.config.provider);
+      if (!hostOffersPluginRequirement(request)) {
+        const enabled = await experimentalWrap();
+        if (enabled === null) throw experimentalWrapError();
+        if (!enabled) throw optInError(request.config.provider);
+      }
       return wrapCreation(request, paseo, cwd, recover);
     }
     await recover(configuredProvider(request.config.provider, providers));
@@ -575,7 +620,7 @@ async function wrapCreation(request: CreateRequest, paseo: Paseo, cwd: string, r
     ...request,
     metadata: { ...request.metadata, [routeMetadataKey]: "wrap" },
     // Where offered, Paseo refuses every later open while Safehouse is inactive, so a lost plugin cannot
-    // reopen the agent unwrapped. Without it, that open starts the harness unsandboxed (CL's ruling, 2026-11-21).
+    // reopen the agent unwrapped. Without it, the experimental setting accepted that such an open starts the harness unsandboxed.
     ...(hostOffersPluginRequirement(request) ? { requirePlugin: true } : {}),
   };
 }
@@ -724,7 +769,8 @@ export async function status(paseo: Paseo, workspaceId: string) {
     digest: policy?.digest ?? null,
     policyValid,
     error: routingError ?? error,
-    unavailable: saved?.unavailable ?? {},
+    unavailable: await unavailableProviders(paseo, saved),
+    experimentalWrap: await experimentalWrap(),
     features: saved?.features ?? [],
     agents,
   };
